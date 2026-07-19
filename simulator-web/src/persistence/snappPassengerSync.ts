@@ -31,6 +31,10 @@ export interface SnappIntegrationBaggage {
   weightKg: number
   destination: string
   bagType: string | null
+  priority?: boolean
+  heavy?: boolean
+  isFinalDestination?: boolean
+  finalDestination?: string | null
 }
 
 export interface SnappPassengerPayload {
@@ -80,16 +84,44 @@ const inferGender = (
     if (age < 12) return 'child'
   }
   const first = passenger.firstName.trim().toLowerCase()
-  // Very small common-name hint set — default male for loadsheet totals
   const femaleHints = ['anna', 'maria', 'sarah', 'emma', 'olivia', 'sophia', 'emily', 'carolyn', 'lisa', 'jennifer']
   if (femaleHints.some((n) => first === n || first.startsWith(n))) return 'female'
   return 'male'
 }
 
-const commodityForBag = (bag: SnappIntegrationBaggage): string => {
+/**
+ * Map SNAPP bag → AirportPay commodity code for Accepted Joining Baggage.
+ * P/J/Y follow cabin (or priority); H heavy/oversize; T/T1 transfer; C carry-on; X other.
+ */
+const commodityForBag = (
+  bag: SnappIntegrationBaggage,
+  passenger: SnappIntegrationPassenger | undefined,
+  flightDestination: string,
+): string => {
   const type = (bag.bagType || '').toLowerCase()
-  if (type.includes('oversize') || type.includes('gate')) return 'H'
+  const status = (bag.status || '').toLowerCase()
+  const cabin = cabinBucket(passenger?.cabin || '')
+
   if (type.includes('carry')) return 'C'
+  if (bag.heavy || type.includes('oversize') || type.includes('gate') || status.includes('heavy')) {
+    return 'H'
+  }
+
+  const bagDest = (bag.finalDestination || bag.destination || '').toUpperCase()
+  const flightDest = (flightDestination || '').toUpperCase()
+  const isTransfer =
+    bag.isFinalDestination === false ||
+    (Boolean(bagDest) && Boolean(flightDest) && bagDest !== flightDest)
+
+  if (isTransfer) {
+    // Short-haul / same-region transfer vs long-haul — keep simple split
+    return bagDest && flightDest && bagDest.slice(0, 1) === flightDest.slice(0, 1) ? 'T1' : 'T'
+  }
+
+  if (bag.priority || status.includes('priority') || cabin === 'first') return 'P'
+  if (cabin === 'business') return 'J'
+  if (type.includes('crew') || status.includes('crew')) return 'D'
+  if (type.includes('empty') || status.includes('uld')) return 'X'
   return 'Y'
 }
 
@@ -112,13 +144,9 @@ export const buildPassengerStateFromSnapp = (payload: SnappPassengerPayload): Pa
   const accepted = { male: 0, female: 0, child: 0, infant: 0, cbbgExst: 0 }
   const bagPiecesByCode: Record<string, number> = Object.fromEntries(defaultBaggageCodes.map((c) => [c, 0]))
   const bagWeightByCode: Record<string, number> = Object.fromEntries(defaultBaggageCodes.map((c) => [c, 0]))
+  let rushBags = 0
 
-  const bagsByPax = new Map<string, SnappIntegrationBaggage[]>()
-  for (const bag of payload.baggage) {
-    const list = bagsByPax.get(bag.passengerId) ?? []
-    list.push(bag)
-    bagsByPax.set(bag.passengerId, list)
-  }
+  const paxById = new Map(payload.passengers.map((p) => [p.id, p]))
 
   for (const passenger of payload.passengers) {
     const cabin = cabinBucket(passenger.cabin)
@@ -132,13 +160,17 @@ export const buildPassengerStateFromSnapp = (payload: SnappPassengerPayload): Pa
     else if (gender === 'child') accepted.child += 1
     else if (gender === 'female') accepted.female += 1
     else accepted.male += 1
+  }
 
-    const bags = bagsByPax.get(passenger.id) ?? []
-    for (const bag of bags) {
-      const code = commodityForBag(bag)
-      bagPiecesByCode[code] = (bagPiecesByCode[code] ?? 0) + 1
-      bagWeightByCode[code] = (bagWeightByCode[code] ?? 0) + (bag.weightKg || 0)
-    }
+  // Accepted joining baggage = all bags tagged for this flight's passengers
+  for (const bag of payload.baggage) {
+    const passenger = paxById.get(bag.passengerId)
+    const code = commodityForBag(bag, passenger, payload.destination)
+    bagPiecesByCode[code] = (bagPiecesByCode[code] ?? 0) + 1
+    bagWeightByCode[code] = (bagWeightByCode[code] ?? 0) + (Number(bag.weightKg) || 0)
+
+    const status = (bag.status || '').toLowerCase()
+    if (status.includes('rush') || status.includes('rushbag')) rushBags += 1
   }
 
   const baggage = defaultBaggageCodes.map((code) => ({
@@ -156,7 +188,7 @@ export const buildPassengerStateFromSnapp = (payload: SnappPassengerPayload): Pa
     acceptedPax,
     acceptedBags,
     passengersInCrewSeats: payload.crewSeatsBlocked ?? 0,
-    rushBags: 0,
+    rushBags,
     baggage,
     saleableConfiguration: payload.saleableConfiguration || '',
     seatingConditions: seatingNotes(payload.passengers),
@@ -175,6 +207,8 @@ export const fetchSnappPassengerPayload = async (flightId: string): Promise<Snap
 
 export const loadSnappPassengerState = async (flightId: string): Promise<PassengerState | null> => {
   const payload = await fetchSnappPassengerPayload(flightId)
-  if (!payload.passengers?.length && !payload.saleableConfiguration) return null
+  if (!payload.passengers?.length && !payload.baggage?.length && !payload.saleableConfiguration) {
+    return null
+  }
   return buildPassengerStateFromSnapp(payload)
 }
