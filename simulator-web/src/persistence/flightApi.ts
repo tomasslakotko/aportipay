@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react'
-import { createClient } from '@supabase/supabase-js'
+import { FIRESTORE_COLLECTIONS, isFirebaseConfigured, subscribeCollection } from './firebaseClient'
+import * as firebaseDb from './firebaseDatabase'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null
 
 export interface AdminFlight {
   id: string
@@ -17,13 +15,18 @@ export interface AdminFlight {
   status: string
   aircraft: string
   controller: string
+  source?: 'aportipay' | 'aa-lids'
   createdAt?: string
   updatedAt?: string
 }
 
+export const isAaLidsFlightId = (id: string) => id.startsWith('aalids-')
+
 export type NewAdminFlight = Omit<AdminFlight, 'id' | 'createdAt' | 'updatedAt'>
 
 export const fetchFlights = async (): Promise<AdminFlight[]> => {
+  if (isFirebaseConfigured()) return firebaseDb.fetchFlights()
+
   const response = await fetch(`${API_BASE_URL}/api/flights`)
   if (!response.ok) throw new Error(`Unable to load flights: ${response.status}`)
 
@@ -31,6 +34,8 @@ export const fetchFlights = async (): Promise<AdminFlight[]> => {
 }
 
 export const createFlight = async (flight: NewAdminFlight): Promise<AdminFlight> => {
+  if (isFirebaseConfigured()) return firebaseDb.createFlight(flight)
+
   const response = await fetch(`${API_BASE_URL}/api/flights`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -43,6 +48,11 @@ export const createFlight = async (flight: NewAdminFlight): Promise<AdminFlight>
 }
 
 export const deleteFlight = async (id: string): Promise<void> => {
+  if (isFirebaseConfigured()) {
+    await firebaseDb.deleteFlight(id)
+    return
+  }
+
   const response = await fetch(`${API_BASE_URL}/api/flights/${id}`, {
     method: 'DELETE',
   })
@@ -72,31 +82,21 @@ export const useLiveFlights = () => {
 
     void load()
 
-    let channel:
-      | ReturnType<NonNullable<typeof supabase>['channel']>
-      | undefined
+    const unsubscribeFirestore = isFirebaseConfigured()
+      ? [
+          subscribeCollection(FIRESTORE_COLLECTIONS.flights, () => { void load() }),
+          subscribeCollection(FIRESTORE_COLLECTIONS.aaLidsFlights, () => { void load() }),
+        ]
+      : []
 
-    try {
-      channel = supabase
-        ?.channel('flights:live')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'flights' }, () => {
-          void load()
-        })
-      if (channel) void channel.subscribe()
-    } catch {
-      channel = undefined
-    }
-
-    const interval = channel
-      ? undefined
-      : window.setInterval(() => {
-          void load()
-        }, 1500)
+    const interval = window.setInterval(() => {
+      void load()
+    }, 1500)
 
     return () => {
       cancelled = true
-      if (interval) window.clearInterval(interval)
-      if (channel) void supabase?.removeChannel(channel)
+      window.clearInterval(interval)
+      unsubscribeFirestore.forEach((unsubscribe) => unsubscribe?.())
     }
   }, [])
 

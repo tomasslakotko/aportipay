@@ -1,17 +1,17 @@
 import { useEffect, useState } from 'react'
-import { createClient } from '@supabase/supabase-js'
 import type { Message } from '../domain/types'
+import { FIRESTORE_COLLECTIONS, isFirebaseConfigured, subscribeCollection } from './firebaseClient'
+import * as firebaseDb from './firebaseDatabase'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null
 
 export interface ChatMessage extends Message {
   flightLabel: string
 }
 
 export const fetchChatMessages = async (flightLabel: string): Promise<ChatMessage[]> => {
+  if (isFirebaseConfigured()) return firebaseDb.fetchChatMessages(flightLabel)
+
   const response = await fetch(`${API_BASE_URL}/api/chat/messages?flightLabel=${encodeURIComponent(flightLabel)}`)
   if (!response.ok) throw new Error(`Unable to load chat: ${response.status}`)
   return response.json() as Promise<ChatMessage[]>
@@ -24,6 +24,8 @@ export const sendChatMessage = async (input: {
   recipient: string
   priority: 'low' | 'medium' | 'high'
 }): Promise<ChatMessage> => {
+  if (isFirebaseConfigured()) return firebaseDb.sendChatMessage(input)
+
   const response = await fetch(`${API_BASE_URL}/api/chat/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -34,6 +36,8 @@ export const sendChatMessage = async (input: {
 }
 
 export const publishChatMessage = async (id: string): Promise<ChatMessage> => {
+  if (isFirebaseConfigured()) return firebaseDb.publishChatMessage(id)
+
   const response = await fetch(`${API_BASE_URL}/api/chat/messages/${encodeURIComponent(id)}/publish`, {
     method: 'PATCH',
   })
@@ -69,30 +73,14 @@ export const useLiveChat = (flightLabel: string, enabled = true) => {
 
     void load()
 
-    let channel:
-      | ReturnType<NonNullable<typeof supabase>['channel']>
-      | undefined
-
-    try {
-      channel = supabase
-        ?.channel(`chat:${encodeURIComponent(flightLabel)}`)
-        .on(
-          'postgres_changes',
-          { event: '*', schema: 'public', table: 'chat_messages', filter: `flight_label=eq.${flightLabel}` },
-          () => {
-            void load()
-          },
+    const unsubscribeFirestore = isFirebaseConfigured()
+      ? subscribeCollection(
+          FIRESTORE_COLLECTIONS.chatMessages,
+          () => { void load() },
+          { field: 'flightLabel', value: flightLabel },
         )
+      : undefined
 
-      if (channel) {
-        void channel.subscribe()
-      }
-    } catch {
-      channel = undefined
-    }
-
-    // Keep a lightweight periodic refresh even with realtime,
-    // so chat stays synced if websocket silently drops.
     const interval = window.setInterval(() => {
       void load()
     }, 1500)
@@ -100,7 +88,7 @@ export const useLiveChat = (flightLabel: string, enabled = true) => {
     return () => {
       cancelled = true
       window.clearInterval(interval)
-      if (channel) void supabase?.removeChannel(channel)
+      unsubscribeFirestore?.()
     }
   }, [enabled, flightLabel])
 

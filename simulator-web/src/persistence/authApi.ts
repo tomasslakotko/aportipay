@@ -1,14 +1,15 @@
-import { createClient } from '@supabase/supabase-js'
+import { isFirebaseConfigured } from './firebaseClient'
+import * as firebaseDb from './firebaseDatabase'
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
+const AUTH_STORAGE_KEY = 'aportipay-auth-session'
 
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  throw new Error('VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are required.')
+export interface AuthSession {
+  id: string
+  email: string
+  role: string
+  emailConfirmed: boolean
 }
-
-export const supabaseAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 const allowedRoles = new Set([
   'Ramp Agent',
@@ -28,64 +29,139 @@ const readRoleField = (value: unknown): string => {
   return allowedRoles.has(trimmed) ? trimmed : ''
 }
 
-export const getAuthRole = (user: { user_metadata?: Record<string, unknown> | null; app_metadata?: Record<string, unknown> | null } | null | undefined) => {
-  if (!user) return ''
-  const fromUserMetadata = readRoleField(user.user_metadata?.role)
-  if (fromUserMetadata) return fromUserMetadata
-  return readRoleField(user.app_metadata?.role)
+const readStoredSession = (): AuthSession | null => {
+  const raw = localStorage.getItem(AUTH_STORAGE_KEY)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as AuthSession
+    if (!parsed?.email || !parsed?.id) return null
+    return parsed
+  } catch {
+    return null
+  }
 }
+
+const writeStoredSession = (session: AuthSession | null) => {
+  if (!session) {
+    localStorage.removeItem(AUTH_STORAGE_KEY)
+    window.dispatchEvent(new CustomEvent('aportipay-auth-changed', { detail: null }))
+    return
+  }
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session))
+  window.dispatchEvent(new CustomEvent('aportipay-auth-changed', { detail: session }))
+}
+
+export const authClient = {
+  auth: {
+    getSession: async () => ({ data: { session: readStoredSession() ? { user: readStoredSession() } : null } }),
+    onAuthStateChange: (callback: (event: string, session: { user: AuthSession } | null) => void) => {
+      const emit = () => {
+        const user = readStoredSession()
+        callback(user ? 'SIGNED_IN' : 'SIGNED_OUT', user ? { user } : null)
+      }
+      emit()
+      const listener = () => emit()
+      window.addEventListener('aportipay-auth-changed', listener)
+      return {
+        data: {
+          subscription: {
+            unsubscribe: () => window.removeEventListener('aportipay-auth-changed', listener),
+          },
+        },
+      }
+    },
+  },
+}
+
+export const supabaseAuth = authClient
+
+export const getAuthRole = (user: { role?: string } | null | undefined) =>
+  readRoleField(user?.role) || DEFAULT_ROLE
 
 export const ensureAuthRole = async (role: string) => {
+  const session = readStoredSession()
+  if (!session?.email) throw new Error('Not signed in')
   const normalized = readRoleField(role) || DEFAULT_ROLE
-  const { data, error } = await supabaseAuth.auth.updateUser({
-    data: { role: normalized },
-  })
-  if (error) throw error
-  return getAuthRole(data.user) || normalized
-}
-
-interface UserRoleRecord {
-  email: string
-  role: string
+  const savedRole = await saveRoleToRoleTable(session.email, normalized)
+  const updated = { ...session, role: savedRole }
+  writeStoredSession(updated)
+  return savedRole
 }
 
 export const fetchRoleFromRoleTable = async (email: string): Promise<string | null> => {
+  if (isFirebaseConfigured()) {
+    const role = await firebaseDb.fetchRoleFromRoleTable(email)
+    return readRoleField(role) || null
+  }
+
   const normalizedEmail = email.trim().toLowerCase()
   if (!normalizedEmail) return null
   const response = await fetch(`${API_BASE_URL}/api/auth/role?email=${encodeURIComponent(normalizedEmail)}`)
   if (response.status === 404) return null
   if (!response.ok) throw new Error(`Unable to load role: ${response.status}`)
-  const payload = await response.json() as UserRoleRecord
+  const payload = await response.json() as { role: string }
   return readRoleField(payload.role) || null
 }
 
 export const saveRoleToRoleTable = async (email: string, role: string): Promise<string> => {
   const normalizedEmail = email.trim().toLowerCase()
   const normalizedRole = readRoleField(role) || DEFAULT_ROLE
+
+  if (isFirebaseConfigured()) {
+    return firebaseDb.saveRoleToRoleTable(normalizedEmail, normalizedRole)
+  }
+
   const response = await fetch(`${API_BASE_URL}/api/auth/role`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: normalizedEmail, role: normalizedRole }),
   })
   if (!response.ok) throw new Error(`Unable to save role: ${response.status}`)
-  const payload = await response.json() as UserRoleRecord
+  const payload = await response.json() as { role: string }
   return readRoleField(payload.role) || normalizedRole
 }
 
 export const signInWithEmail = async (email: string, password: string) => {
-  const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password })
-  if (error) throw error
-  return data
+  const user = isFirebaseConfigured()
+    ? await firebaseDb.loginUser(email, password)
+    : await (async () => {
+        const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        })
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null) as { error?: string } | null
+          throw new Error(payload?.error || `Login failed: ${response.status}`)
+        }
+        return response.json() as Promise<AuthSession>
+      })()
+
+  writeStoredSession(user)
+  return { user, session: { user } }
 }
 
 export const signUpWithEmail = async (email: string, password: string, role: string) => {
   const normalized = readRoleField(role) || DEFAULT_ROLE
-  const { data, error } = await supabaseAuth.auth.signUp({ email, password, options: { data: { role: normalized } } })
-  if (error) throw error
-  return data
+  const user = isFirebaseConfigured()
+    ? await firebaseDb.registerUser(email, password, normalized)
+    : await (async () => {
+        const response = await fetch(`${API_BASE_URL}/api/auth/signup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password, role: normalized }),
+        })
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null) as { error?: string } | null
+          throw new Error(payload?.error || `Signup failed: ${response.status}`)
+        }
+        return response.json() as Promise<AuthSession>
+      })()
+
+  writeStoredSession(user)
+  return { user, session: { user } }
 }
 
 export const signOutAuth = async () => {
-  const { error } = await supabaseAuth.auth.signOut()
-  if (error) throw error
+  writeStoredSession(null)
 }

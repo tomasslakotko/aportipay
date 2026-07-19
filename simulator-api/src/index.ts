@@ -3,6 +3,7 @@ import cors from 'cors'
 import express from 'express'
 import {
   createAuthUserWithRole,
+  verifyAuthUserPassword,
   createChatMessage,
   createFlight,
   deleteFlightClosure,
@@ -228,6 +229,48 @@ app.delete('/api/flight-closures/:flightLabel', async (req, res) => {
   res.status(204).send()
 })
 
+app.post('/api/auth/login', async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}
+  const email = readTextField(body, 'email').toLowerCase()
+  const password = readTextField(body, 'password')
+  if (!email || !password) {
+    res.status(400).json({ error: 'email and password are required.' })
+    return
+  }
+  const user = await verifyAuthUserPassword(email, password)
+  if (!user) {
+    res.status(401).json({ error: 'Invalid email or password.' })
+    return
+  }
+  res.json(user)
+})
+
+app.post('/api/auth/signup', async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}
+  const email = readTextField(body, 'email').toLowerCase()
+  const password = readTextField(body, 'password')
+  const role = readTextField(body, 'role', 'Ramp Agent')
+  if (!email || !password) {
+    res.status(400).json({ error: 'email and password are required.' })
+    return
+  }
+  try {
+    res.status(201).json(await createAuthUserWithRole({
+      email,
+      password,
+      role,
+      autoConfirmEmail: true,
+    }))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Could not create user.'
+    if (message.toLowerCase().includes('already registered')) {
+      res.status(409).json({ error: message })
+      return
+    }
+    throw error
+  }
+})
+
 app.get('/api/auth/role', async (req, res) => {
   const email = typeof req.query.email === 'string' ? req.query.email.trim().toLowerCase() : ''
   if (!email) {
@@ -267,10 +310,8 @@ app.post('/api/admin/users', async (req, res) => {
     res.status(201).json(await createAuthUserWithRole({ email, password, role, autoConfirmEmail }))
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not create user.'
-    if (message.toLowerCase().includes('user not allowed')) {
-      res.status(500).json({
-        error: 'Supabase Admin API denied request. SUPABASE_SERVICE_ROLE_KEY is not a service_role key.',
-      })
+    if (message.toLowerCase().includes('already registered')) {
+      res.status(409).json({ error: message })
       return
     }
     throw error

@@ -15,6 +15,16 @@ import { reopenFlightGlobally, useLiveFlightClosures } from '../persistence/flig
 import { playNotificationSound, type NotificationSoundPreset } from '../persistence/notificationSound'
 import { calculateBalance } from '../engine/simulatorEngine'
 import type { AdminFlight, NewAdminFlight } from '../persistence/flightApi'
+import {
+  loadAaLidsPassengerState,
+  resolveAaLidsFlightId,
+} from '../persistence/aaLidsPassengerSync'
+import {
+  fetchPassengerAcceptanceFinalised,
+  setPassengerAcceptanceFinalised,
+  subscribePassengerAcceptanceFinalised,
+} from '../persistence/passengerAcceptance'
+import { isFirebaseConfigured, subscribeCollection, FIRESTORE_COLLECTIONS } from '../persistence/firebaseClient'
 import { createFlight as createAdminFlight, deleteFlight, useLiveFlights } from '../persistence/flightApi'
 import { createFlightState, createPassengerState, useSimulatorStore } from '../store/useSimulatorStore'
 
@@ -983,9 +993,13 @@ export function MessengerModule() {
 }
 
 export function PassengerModule() {
-  const { state, setPassenger } = useSimulatorStore()
+  const { state, setPassenger, openFlights, activeFlightIndex } = useSimulatorStore()
+  const { flights: adminFlights } = useLiveFlights()
   const [draft, setDraft] = useState(() => createPassengerState(state.passenger))
   const [activeSection, setActiveSection] = useState('Booked Passengers')
+  const [aaLidsSyncNote, setAaLidsSyncNote] = useState('')
+  const activeFlightLabel = openFlights[Math.max(0, Math.min(activeFlightIndex, openFlights.length - 1))] ?? ''
+  const aaLidsFlightId = resolveAaLidsFlightId(activeFlightLabel, adminFlights)
   const destination = state.route.split('-')[1] || state.route || 'Not set'
   const bookedTotal = draft.booked.first + draft.booked.business + draft.booked.economy
   const transitTotal = draft.transit.first + draft.transit.business + draft.transit.economy
@@ -995,6 +1009,45 @@ export function PassengerModule() {
   useEffect(() => {
     setDraft(createPassengerState(state.passenger))
   }, [state.passenger])
+
+  useEffect(() => {
+    if (!aaLidsFlightId || !isFirebaseConfigured()) {
+      setAaLidsSyncNote('')
+      return
+    }
+
+    let cancelled = false
+    const syncFromAaLids = async () => {
+      try {
+        const synced = await loadAaLidsPassengerState(aaLidsFlightId)
+        if (cancelled || !synced) {
+          if (!cancelled) setAaLidsSyncNote('No passengers found in aa-lids for this flight.')
+          return
+        }
+        const finalised = await fetchPassengerAcceptanceFinalised(activeFlightLabel, aaLidsFlightId)
+        const merged = createPassengerState({ ...synced, finalised })
+        setDraft(merged)
+        setPassenger(merged)
+        setAaLidsSyncNote('Passenger and baggage counts loaded from aa-lids.')
+      } catch (error) {
+        if (!cancelled) {
+          setAaLidsSyncNote(error instanceof Error ? error.message : 'Could not load aa-lids passengers.')
+        }
+      }
+    }
+
+    void syncFromAaLids()
+    const unsubscribe = subscribeCollection(
+      FIRESTORE_COLLECTIONS.aaLidsPassengers,
+      () => { void syncFromAaLids() },
+      { field: 'flightId', value: aaLidsFlightId },
+    )
+
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [aaLidsFlightId, setPassenger])
 
   const updateCabin = (section: 'booked' | 'transit', key: 'first' | 'business' | 'economy', value: number) => {
     setDraft((current) => ({
@@ -1028,19 +1081,60 @@ export function PassengerModule() {
     })
   }
 
+  const persistAcceptanceStatus = async (finalised: boolean) => {
+    if (!activeFlightLabel) return
+    try {
+      await setPassengerAcceptanceFinalised({
+        flightLabel: activeFlightLabel,
+        aaLidsFlightId,
+        finalised,
+      })
+    } catch (error) {
+      console.warn('Unable to sync passenger acceptance status', error)
+    }
+  }
+
   const savePassenger = (finalised = draft.finalised) => {
     const next = createPassengerState({ ...draft, finalised })
     setDraft(next)
     setPassenger(next)
+    void persistAcceptanceStatus(finalised)
   }
+
+  useEffect(() => {
+    if (!activeFlightLabel) return
+    let cancelled = false
+
+    const applyFinalised = (finalised: boolean) => {
+      if (cancelled) return
+      setDraft((current) => createPassengerState({ ...current, finalised }))
+      const store = useSimulatorStore.getState()
+      store.setPassenger(createPassengerState({ ...store.state.passenger, finalised }))
+    }
+
+    void fetchPassengerAcceptanceFinalised(activeFlightLabel, aaLidsFlightId)
+      .then(applyFinalised)
+      .catch(() => {})
+
+    const unsubscribe = subscribePassengerAcceptanceFinalised(
+      activeFlightLabel,
+      aaLidsFlightId,
+      applyFinalised,
+    )
+
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [activeFlightLabel, aaLidsFlightId])
 
   return (
     <section className="module-card passenger-screen">
       <aside className="passenger-left">
         <div className="passenger-box">
           <h4>Acceptance Status</h4>
-          <label><input type="radio" name="acceptance" checked={!draft.finalised} onChange={() => setDraft((current) => ({ ...current, finalised: false }))} /> Open</label>
-          <label><input type="radio" name="acceptance" checked={draft.finalised} onChange={() => setDraft((current) => ({ ...current, finalised: true }))} /> Finalize</label>
+          <label><input type="radio" name="acceptance" checked={!draft.finalised} onChange={() => savePassenger(false)} /> Open</label>
+          <label><input type="radio" name="acceptance" checked={draft.finalised} onChange={() => savePassenger(true)} /> Finalize</label>
         </div>
         <div className="passenger-box">
           <h4>Saleable Configuration</h4>
@@ -1077,6 +1171,11 @@ export function PassengerModule() {
         </nav>
       </aside>
       <div className="passenger-main">
+        {aaLidsSyncNote ? <p className="search-note">{aaLidsSyncNote}</p> : null}
+        {draft.finalised ? (
+          <p className="search-note">Passenger acceptance is finalised. Agents cannot add new passengers in aa-lids.</p>
+        ) : null}
+        <fieldset className="passenger-fields" disabled={draft.finalised}>
         <div className="passenger-summary-grid">
           <section>
             <h4>Total Accepted Passenger</h4>
@@ -1154,9 +1253,10 @@ export function PassengerModule() {
             </label>
           </div>
         </section>
+        </fieldset>
         <div className="passenger-actions">
-          <button onClick={() => savePassenger()}>Save</button>
-          <button onClick={() => savePassenger(true)}>Finalise Acceptance</button>
+          <button onClick={() => savePassenger()} disabled={draft.finalised}>Save</button>
+          <button onClick={() => savePassenger(true)} disabled={draft.finalised}>Finalise Acceptance</button>
         </div>
       </div>
     </section>
@@ -1450,7 +1550,7 @@ export function AdminModule() {
     <section className="module-card admin-module">
       <h3>Admin Control</h3>
       <p className="search-note">
-        Add flights here. They are saved in Supabase and become available in Search.
+        Add flights here. They are saved in Firebase and become available in Search.
       </p>
       <div className="admin-grid">
         <form
@@ -1831,7 +1931,7 @@ export function SearchModule() {
             <tbody>
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9}>No saved flights match the search. Add flights in Admin first.</td>
+                  <td colSpan={9}>No flights match the search. Add flights in Admin or create them in aa-lids.</td>
                 </tr>
               ) : visibleRows.map((row) => (
                 <tr key={row.id} className={selectedIds.includes(row.id) ? 'selected' : ''}>

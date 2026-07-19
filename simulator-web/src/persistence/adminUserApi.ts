@@ -1,3 +1,6 @@
+import { isFirebaseConfigured } from './firebaseClient'
+import * as firebaseDb from './firebaseDatabase'
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
 
 export interface CreateAdminUserInput {
@@ -22,6 +25,14 @@ export interface AdminUserRow {
 }
 
 export const createAdminUser = async (input: CreateAdminUserInput): Promise<CreatedAdminUser> => {
+  if (isFirebaseConfigured()) {
+    return firebaseDb.createAdminUser({
+      email: input.email,
+      password: input.password,
+      role: input.role,
+    })
+  }
+
   const response = await fetch(`${API_BASE_URL}/api/admin/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -35,12 +46,16 @@ export const createAdminUser = async (input: CreateAdminUserInput): Promise<Crea
 }
 
 export const listAdminUsers = async (): Promise<AdminUserRow[]> => {
+  if (isFirebaseConfigured()) return firebaseDb.listAdminUsers()
+
   const response = await fetch(`${API_BASE_URL}/api/admin/users`)
   if (!response.ok) throw new Error(`Unable to load users: ${response.status}`)
   return response.json() as Promise<AdminUserRow[]>
 }
 
 export const updateAdminUserRole = async (email: string, role: string): Promise<AdminUserRow> => {
+  if (isFirebaseConfigured()) return firebaseDb.updateAdminUserRole(email, role)
+
   const response = await fetch(`${API_BASE_URL}/api/admin/users/role`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -51,6 +66,11 @@ export const updateAdminUserRole = async (email: string, role: string): Promise<
 }
 
 export const resetAdminUserPassword = async (email: string, password: string): Promise<void> => {
+  if (isFirebaseConfigured()) {
+    await firebaseDb.resetAdminUserPassword(email, password)
+    return
+  }
+
   const response = await fetch(`${API_BASE_URL}/api/admin/users/password`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

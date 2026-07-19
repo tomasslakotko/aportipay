@@ -1,4 +1,10 @@
-import { createClient } from '@supabase/supabase-js'
+import {
+  COLLECTIONS,
+  getAdminAuth,
+  getDb,
+  isFirebaseConfigured,
+  stripUndefined,
+} from './firebaseAdmin.js'
 
 export interface SessionRecord {
   id: string
@@ -60,165 +66,126 @@ export interface AuthUserRecord {
   emailConfirmed: boolean
 }
 
-const supabaseUrl = process.env.SUPABASE_URL
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-
-if (!supabaseUrl || !supabaseServiceRoleKey) {
-  throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for simulator-api.')
-}
-
-const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false,
-  },
-})
-
-interface SessionRow {
+interface StoredUser {
   id: string
-  scenario_id: string
-  score: number
-  snapshot_json: unknown
-  created_at: string
-  updated_at: string
-}
-
-interface FlightRow {
-  id: string
-  carrier: string
-  flight_no: string
-  flight_date: string
-  dep: string
-  arr: string
-  flight_time: string
-  status: string
-  aircraft: string
-  controller: string
-  created_at: string
-  updated_at: string
-}
-
-interface ChatMessageRow {
-  id: string
-  flight_label: string
-  author: string
-  text: string
-  recipient: string
-  priority: 'low' | 'medium' | 'high'
-  status: 'sent' | 'published'
-  created_at: string
-  updated_at: string
-}
-
-interface FlightClosureRow {
-  id: number
-  flight_label: string
-  signature_data: string
-  closed_by: string | null
-  closed_device: string | null
-  closed_at: string
-  created_at: string
-}
-
-interface UserRoleRow {
   email: string
+  passwordHash: string
   role: string
-  created_at: string
-  updated_at: string
+  emailConfirmed?: boolean
+  createdAt?: string
+  updatedAt?: string
 }
 
-const rowToRecord = (row: SessionRow): SessionRecord => ({
-  id: row.id,
-  scenarioId: row.scenario_id,
-  score: row.score,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  snapshot: row.snapshot_json,
+const db = () => {
+  if (!isFirebaseConfigured()) {
+    throw new Error('FIREBASE_PROJECT_ID must be set for simulator-api.')
+  }
+  return getDb()
+}
+
+const simpleHash = (password: string) => {
+  let hash = 0
+  for (let i = 0; i < password.length; i++) {
+    const char = password.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash &= hash
+  }
+  return hash.toString()
+}
+
+const rowToRecord = (id: string, row: Record<string, unknown>): SessionRecord => ({
+  id,
+  scenarioId: String(row.scenarioId ?? row.scenario_id ?? 'turnaround-basic'),
+  score: Number(row.score ?? 0),
+  createdAt: String(row.createdAt ?? row.created_at ?? new Date().toISOString()),
+  updatedAt: String(row.updatedAt ?? row.updated_at ?? new Date().toISOString()),
+  snapshot: row.snapshot ?? row.snapshot_json ?? {},
 })
 
-const rowToFlight = (row: FlightRow): FlightRecord => ({
-  id: row.id,
-  carrier: row.carrier,
-  flightNo: row.flight_no,
-  date: row.flight_date,
-  dep: row.dep,
-  arr: row.arr,
-  time: row.flight_time,
-  status: row.status,
-  aircraft: row.aircraft,
-  controller: row.controller,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
+const rowToFlight = (id: string, row: Record<string, unknown>): FlightRecord => ({
+  id,
+  carrier: String(row.carrier ?? ''),
+  flightNo: String(row.flightNo ?? row.flight_no ?? ''),
+  date: String(row.date ?? row.flight_date ?? ''),
+  dep: String(row.dep ?? ''),
+  arr: String(row.arr ?? ''),
+  time: String(row.time ?? row.flight_time ?? ''),
+  status: String(row.status ?? ''),
+  aircraft: String(row.aircraft ?? ''),
+  controller: String(row.controller ?? ''),
+  createdAt: String(row.createdAt ?? row.created_at ?? new Date().toISOString()),
+  updatedAt: String(row.updatedAt ?? row.updated_at ?? new Date().toISOString()),
 })
 
-const rowToChatMessage = (row: ChatMessageRow): ChatMessageRecord => ({
-  id: row.id,
-  flightLabel: row.flight_label,
-  author: row.author,
-  text: row.text,
-  recipient: row.recipient,
-  priority: row.priority,
-  status: row.status,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
+const rowToChatMessage = (id: string, row: Record<string, unknown>): ChatMessageRecord => ({
+  id,
+  flightLabel: String(row.flightLabel ?? row.flight_label ?? ''),
+  author: String(row.author ?? ''),
+  text: String(row.text ?? ''),
+  recipient: String(row.recipient ?? 'Ramp'),
+  priority: (row.priority === 'low' || row.priority === 'high' ? row.priority : 'medium'),
+  status: row.status === 'published' ? 'published' : 'sent',
+  createdAt: String(row.createdAt ?? row.created_at ?? new Date().toISOString()),
+  updatedAt: String(row.updatedAt ?? row.updated_at ?? new Date().toISOString()),
 })
 
-const rowToFlightClosure = (row: FlightClosureRow): FlightClosureRecord => ({
-  ...(() => {
-    const combined = row.closed_by ?? ''
-    if (!row.closed_device && combined.includes(' @@ ')) {
-      const [by, device] = combined.split(' @@ ')
-      return {
-        closedBy: by || null,
-        closedDevice: device || null,
-      }
-    }
-    return {
-      closedBy: row.closed_by,
-      closedDevice: row.closed_device ?? null,
-    }
-  })(),
-  id: row.id,
-  flightLabel: row.flight_label,
-  signatureData: row.signature_data,
-  closedAt: row.closed_at,
-  createdAt: row.created_at,
+const rowToFlightClosure = (id: string, row: Record<string, unknown>): FlightClosureRecord => {
+  const combined = row.closedBy ?? row.closed_by ?? null
+  let closedBy = typeof combined === 'string' ? combined : null
+  let closedDevice = row.closedDevice ?? row.closed_device ?? null
+  if (!closedDevice && typeof closedBy === 'string' && closedBy.includes(' @@ ')) {
+    const [by, device] = closedBy.split(' @@ ')
+    closedBy = by || null
+    closedDevice = device || null
+  }
+  return {
+    id: Number(row.legacyId ?? row.id ?? id) || 0,
+    flightLabel: String(row.flightLabel ?? row.flight_label ?? id),
+    signatureData: String(row.signatureData ?? row.signature_data ?? ''),
+    closedBy: closedBy ? String(closedBy) : null,
+    closedDevice: closedDevice ? String(closedDevice) : null,
+    closedAt: String(row.closedAt ?? row.closed_at ?? new Date().toISOString()),
+    createdAt: String(row.createdAt ?? row.created_at ?? new Date().toISOString()),
+  }
+}
+
+const rowToUserRole = (row: Record<string, unknown>): UserRoleRecord => ({
+  email: String(row.email ?? ''),
+  role: String(row.role ?? ''),
+  createdAt: String(row.createdAt ?? row.created_at ?? new Date().toISOString()),
+  updatedAt: String(row.updatedAt ?? row.updated_at ?? new Date().toISOString()),
 })
 
-const rowToUserRole = (row: UserRoleRow): UserRoleRecord => ({
-  email: row.email,
-  role: row.role,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-})
+const findStoredUserByEmail = async (email: string): Promise<StoredUser | null> => {
+  const normalizedEmail = email.trim().toLowerCase()
+  const snapshot = await db().collection(COLLECTIONS.users)
+    .where('email', '==', normalizedEmail)
+    .limit(1)
+    .get()
+  const found = snapshot.docs[0]
+  if (!found) return null
+  return { id: found.id, ...found.data() } as StoredUser
+}
 
 export const listSessions = async (): Promise<SessionRecord[]> => {
-  const { data: rows, error } = await supabase
-    .from('sessions')
-    .select('*')
-    .order('updated_at', { ascending: false })
-
-  if (error) throw error
-  return (rows ?? []).map(rowToRecord)
+  const snapshot = await db().collection(COLLECTIONS.sessions)
+    .orderBy('updatedAt', 'desc')
+    .get()
+  return snapshot.docs.map((doc) => rowToRecord(doc.id, doc.data()))
 }
 
 export const getLatestSession = async (): Promise<SessionRecord | null> => {
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .select('*')
-    .order('updated_at', { ascending: false })
+  const snapshot = await db().collection(COLLECTIONS.sessions)
+    .orderBy('updatedAt', 'desc')
     .limit(1)
-    .maybeSingle()
-
-  if (error) throw error
-  return row ? rowToRecord(row) : null
+    .get()
+  const doc = snapshot.docs[0]
+  return doc ? rowToRecord(doc.id, doc.data()) : null
 }
 
 export const getSession = async (id: string): Promise<SessionRecord | null> => {
-  const { data: row, error } = await supabase.from('sessions').select('*').eq('id', id).maybeSingle()
-
-  if (error) throw error
-  return row ? rowToRecord(row) : null
+  const doc = await db().collection(COLLECTIONS.sessions).doc(id).get()
+  return doc.exists ? rowToRecord(doc.id, doc.data()!) : null
 }
 
 export const upsertSession = async (
@@ -227,50 +194,31 @@ export const upsertSession = async (
   score: number,
   snapshot: unknown,
 ): Promise<SessionRecord> => {
-  const { data: existing, error: existingError } = await supabase
-    .from('sessions')
-    .select('created_at')
-    .eq('id', id)
-    .maybeSingle()
-
-  if (existingError) throw existingError
+  const existing = await db().collection(COLLECTIONS.sessions).doc(id).get()
   const now = new Date().toISOString()
-  const createdAt = existing?.created_at ?? now
-
-  const { error: upsertError } = await supabase.from('sessions').upsert(
-    {
-      id,
-      scenario_id: scenarioId,
-      score,
-      snapshot_json: snapshot,
-      created_at: createdAt,
-      updated_at: now,
-    },
-    { onConflict: 'id' },
-  )
-
-  if (upsertError) throw upsertError
-
-  return {
-    id,
+  const createdAt = String(existing.data()?.createdAt ?? existing.data()?.created_at ?? now)
+  const record = stripUndefined({
     scenarioId,
     score,
+    snapshot,
     createdAt,
     updatedAt: now,
-    snapshot,
-  }
+  })
+  await db().collection(COLLECTIONS.sessions).doc(id).set(record, { merge: true })
+  return { id, scenarioId, score, createdAt, updatedAt: now, snapshot }
 }
 
 export const listFlights = async (): Promise<FlightRecord[]> => {
-  const { data: rows, error } = await supabase
-    .from('flights')
-    .select('*')
-    .order('flight_date', { ascending: false })
-    .order('flight_time', { ascending: false })
-    .order('created_at', { ascending: false })
-
-  if (error) throw error
-  return (rows ?? []).map(rowToFlight)
+  const snapshot = await db().collection(COLLECTIONS.flights).get()
+  return snapshot.docs
+    .map((doc) => rowToFlight(doc.id, doc.data()))
+    .sort((a, b) => {
+      const dateCompare = b.date.localeCompare(a.date)
+      if (dateCompare !== 0) return dateCompare
+      const timeCompare = b.time.localeCompare(a.time)
+      if (timeCompare !== 0) return timeCompare
+      return b.createdAt.localeCompare(a.createdAt)
+    })
 }
 
 export const createFlight = async (
@@ -278,48 +226,26 @@ export const createFlight = async (
 ): Promise<FlightRecord> => {
   const now = new Date().toISOString()
   const id = `flt-${Date.now()}`
-
-  const { error } = await supabase.from('flights').insert({
-    id,
-    carrier: input.carrier,
-    flight_no: input.flightNo,
-    flight_date: input.date,
-    dep: input.dep,
-    arr: input.arr,
-    flight_time: input.time,
-    status: input.status,
-    aircraft: input.aircraft,
-    controller: input.controller,
-    created_at: now,
-    updated_at: now,
-  })
-
-  if (error) throw error
-
-  return {
-    id,
-    ...input,
-    createdAt: now,
-    updatedAt: now,
-  }
+  const record = stripUndefined({ ...input, createdAt: now, updatedAt: now })
+  await db().collection(COLLECTIONS.flights).doc(id).set(record)
+  return { id, ...input, createdAt: now, updatedAt: now }
 }
 
 export const deleteFlight = async (id: string): Promise<boolean> => {
-  const { data, error } = await supabase.from('flights').delete().eq('id', id).select('id')
-  if (error) throw error
-  return (data?.length ?? 0) > 0
+  const doc = await db().collection(COLLECTIONS.flights).doc(id).get()
+  if (!doc.exists) return false
+  await doc.ref.delete()
+  return true
 }
 
 export const listChatMessages = async (flightLabel: string): Promise<ChatMessageRecord[]> => {
-  const { data, error } = await supabase
-    .from('chat_messages')
-    .select('*')
-    .eq('flight_label', flightLabel)
-    .order('created_at', { ascending: false })
+  const snapshot = await db().collection(COLLECTIONS.chatMessages)
+    .where('flightLabel', '==', flightLabel)
     .limit(200)
-
-  if (error) throw error
-  return (data ?? []).map(rowToChatMessage)
+    .get()
+  return snapshot.docs
+    .map((doc) => rowToChatMessage(doc.id, doc.data()))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 }
 
 export const createChatMessage = async (input: {
@@ -331,47 +257,31 @@ export const createChatMessage = async (input: {
 }): Promise<ChatMessageRecord> => {
   const id = `msg-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
   const now = new Date().toISOString()
-  const { data, error } = await supabase
-    .from('chat_messages')
-    .insert({
-      id,
-      flight_label: input.flightLabel,
-      author: input.author,
-      text: input.text,
-      recipient: input.recipient,
-      priority: input.priority,
-      status: 'sent',
-      created_at: now,
-      updated_at: now,
-    })
-    .select('*')
-    .single()
-
-  if (error) throw error
-  return rowToChatMessage(data)
+  const record = stripUndefined({
+    ...input,
+    status: 'sent',
+    createdAt: now,
+    updatedAt: now,
+  })
+  await db().collection(COLLECTIONS.chatMessages).doc(id).set(record)
+  return { id, ...input, status: 'sent', createdAt: now, updatedAt: now }
 }
 
 export const publishChatMessage = async (id: string): Promise<ChatMessageRecord | null> => {
+  const ref = db.collection(COLLECTIONS.chatMessages).doc(id)
+  const existing = await ref.get()
+  if (!existing.exists) return null
   const now = new Date().toISOString()
-  const { data, error } = await supabase
-    .from('chat_messages')
-    .update({ status: 'published', updated_at: now })
-    .eq('id', id)
-    .select('*')
-    .maybeSingle()
-
-  if (error) throw error
-  return data ? rowToChatMessage(data) : null
+  await ref.set(stripUndefined({ status: 'published', updatedAt: now }), { merge: true })
+  return rowToChatMessage(id, { ...existing.data(), status: 'published', updatedAt: now })
 }
 
 export const listFlightClosures = async (): Promise<FlightClosureRecord[]> => {
-  const { data, error } = await supabase
-    .from('flight_closures')
-    .select('*')
-    .order('closed_at', { ascending: false })
+  const snapshot = await db().collection(COLLECTIONS.flightClosures)
+    .orderBy('closedAt', 'desc')
     .limit(500)
-  if (error) throw error
-  return (data ?? []).map(rowToFlightClosure)
+    .get()
+  return snapshot.docs.map((doc) => rowToFlightClosure(doc.id, doc.data()))
 }
 
 export const upsertFlightClosure = async (input: {
@@ -381,129 +291,78 @@ export const upsertFlightClosure = async (input: {
   closedDevice?: string
 }): Promise<FlightClosureRecord> => {
   const now = new Date().toISOString()
-  const payload = {
-    flight_label: input.flightLabel,
-    signature_data: input.signatureData,
-    closed_by: input.closedBy ?? null,
-    closed_device: input.closedDevice ?? null,
-    closed_at: now,
-  }
-  let { data, error } = await supabase
-    .from('flight_closures')
-    .upsert(
-      payload,
-      { onConflict: 'flight_label' },
-    )
-    .select('*')
-    .single()
-  if (error?.message?.toLowerCase().includes('closed_device')) {
-    ;({ data, error } = await supabase
-      .from('flight_closures')
-      .upsert(
-        {
-          flight_label: input.flightLabel,
-          signature_data: input.signatureData,
-          closed_by: [input.closedBy ?? '', input.closedDevice ?? ''].filter(Boolean).join(' @@ ') || null,
-          closed_at: now,
-        },
-        { onConflict: 'flight_label' },
-      )
-      .select('*')
-      .single())
-  }
-  if (error) throw error
-  return rowToFlightClosure(data)
+  const existing = await db().collection(COLLECTIONS.flightClosures).doc(input.flightLabel).get()
+  const record = stripUndefined({
+    flightLabel: input.flightLabel,
+    signatureData: input.signatureData,
+    closedBy: input.closedBy ?? null,
+    closedDevice: input.closedDevice ?? null,
+    closedAt: now,
+    createdAt: String(existing.data()?.createdAt ?? existing.data()?.created_at ?? now),
+    legacyId: existing.data()?.legacyId ?? existing.data()?.id ?? Date.now(),
+  })
+  await db().collection(COLLECTIONS.flightClosures).doc(input.flightLabel).set(record, { merge: true })
+  return rowToFlightClosure(input.flightLabel, record)
 }
 
 export const deleteFlightClosure = async (flightLabel: string): Promise<boolean> => {
-  const { data, error } = await supabase
-    .from('flight_closures')
-    .delete()
-    .eq('flight_label', flightLabel)
-    .select('id')
-  if (error) throw error
-  return (data?.length ?? 0) > 0
+  const ref = db.collection(COLLECTIONS.flightClosures).doc(flightLabel)
+  const existing = await ref.get()
+  if (!existing.exists) return false
+  await ref.delete()
+  return true
 }
 
 export const getUserRoleByEmail = async (email: string): Promise<UserRoleRecord | null> => {
   const normalizedEmail = email.trim().toLowerCase()
   if (!normalizedEmail) return null
-  const { data, error } = await supabase
-    .from('user_roles')
-    .select('*')
-    .eq('email', normalizedEmail)
-    .maybeSingle()
-  if (error) {
-    if (error.message.toLowerCase().includes('user_roles')) return null
-    throw error
-  }
-  return data ? rowToUserRole(data) : null
+  const doc = await db().collection(COLLECTIONS.userRoles).doc(normalizedEmail).get()
+  return doc.exists ? rowToUserRole({ email: normalizedEmail, ...doc.data() }) : null
 }
 
 export const upsertUserRoleByEmail = async (email: string, role: string): Promise<UserRoleRecord> => {
   const normalizedEmail = email.trim().toLowerCase()
   const normalizedRole = role.trim()
   const now = new Date().toISOString()
-  const { data, error } = await supabase
-    .from('user_roles')
-    .upsert(
-      {
-        email: normalizedEmail,
-        role: normalizedRole,
-        updated_at: now,
-      },
-      { onConflict: 'email' },
-    )
-    .select('*')
-    .single()
-  if (error) {
-    if (error.message.toLowerCase().includes('user_roles')) {
-      return {
-        email: normalizedEmail,
-        role: normalizedRole,
-        createdAt: now,
-        updatedAt: now,
-      }
-    }
-    throw error
-  }
-  return rowToUserRole(data)
+  const existing = await db().collection(COLLECTIONS.userRoles).doc(normalizedEmail).get()
+  const record = stripUndefined({
+    email: normalizedEmail,
+    role: normalizedRole,
+    createdAt: String(existing.data()?.createdAt ?? existing.data()?.created_at ?? now),
+    updatedAt: now,
+  })
+  await db().collection(COLLECTIONS.userRoles).doc(normalizedEmail).set(record, { merge: true })
+  return rowToUserRole(record)
 }
 
 export const listUserRoles = async (): Promise<UserRoleRecord[]> => {
-  const { data, error } = await supabase
-    .from('user_roles')
-    .select('*')
-    .order('updated_at', { ascending: false })
+  const snapshot = await db().collection(COLLECTIONS.userRoles)
+    .orderBy('updatedAt', 'desc')
     .limit(1000)
-  if (error) {
-    if (error.message.toLowerCase().includes('user_roles')) return []
-    throw error
-  }
-  return (data ?? []).map(rowToUserRole)
+    .get()
+  return snapshot.docs.map((doc) => rowToUserRole({ email: doc.id, ...doc.data() }))
 }
 
-const findAuthUserByEmail = async (email: string) => {
-  const normalizedEmail = email.trim().toLowerCase()
-  let page = 1
-  const perPage = 200
-  while (page <= 20) {
-    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage })
-    if (error) throw error
-    const users = data.users ?? []
-    const matched = users.find((user) => (user.email ?? '').toLowerCase() === normalizedEmail)
-    if (matched) return matched
-    if (users.length < perPage) break
-    page += 1
+export const verifyAuthUserPassword = async (email: string, password: string): Promise<AuthUserRecord | null> => {
+  const user = await findStoredUserByEmail(email)
+  if (!user || user.passwordHash !== simpleHash(password)) return null
+  const roleRecord = await getUserRoleByEmail(email)
+  return {
+    id: user.id,
+    email: user.email,
+    role: roleRecord?.role ?? user.role ?? 'Ramp Agent',
+    emailConfirmed: Boolean(user.emailConfirmed ?? true),
   }
-  return null
 }
 
 export const setAuthUserPasswordByEmail = async (email: string, password: string): Promise<boolean> => {
-  const user = await findAuthUserByEmail(email)
+  const user = await findStoredUserByEmail(email)
   if (!user) return false
-  const { error } = await supabase.auth.admin.updateUserById(user.id, { password })
-  if (error) throw error
+  const now = new Date().toISOString()
+  await db().collection(COLLECTIONS.users).doc(user.id).set(
+    stripUndefined({ passwordHash: simpleHash(password), updatedAt: now }),
+    { merge: true },
+  )
   return true
 }
 
@@ -515,18 +374,37 @@ export const createAuthUserWithRole = async (input: {
 }): Promise<AuthUserRecord> => {
   const normalizedEmail = input.email.trim().toLowerCase()
   const normalizedRole = input.role.trim()
-  const { data, error } = await supabase.auth.admin.createUser({
+  const existing = await findStoredUserByEmail(normalizedEmail)
+  if (existing) {
+    throw new Error('User already registered')
+  }
+
+  const now = new Date().toISOString()
+  const userId = `user-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+  await db().collection(COLLECTIONS.users).doc(userId).set(stripUndefined({
     email: normalizedEmail,
-    password: input.password,
-    email_confirm: input.autoConfirmEmail,
-    user_metadata: { role: normalizedRole },
-  })
-  if (error) throw error
+    passwordHash: simpleHash(input.password),
+    role: normalizedRole,
+    emailConfirmed: input.autoConfirmEmail,
+    createdAt: now,
+    updatedAt: now,
+  }))
+
+  try {
+    await getAdminAuth().createUser({
+      email: normalizedEmail,
+      password: input.password,
+      emailVerified: input.autoConfirmEmail,
+    })
+  } catch {
+    // Custom auth in Firestore remains the source of truth for the simulator.
+  }
+
   await upsertUserRoleByEmail(normalizedEmail, normalizedRole)
   return {
-    id: data.user.id,
-    email: data.user.email ?? normalizedEmail,
+    id: userId,
+    email: normalizedEmail,
     role: normalizedRole,
-    emailConfirmed: Boolean(data.user.email_confirmed_at),
+    emailConfirmed: input.autoConfirmEmail,
   }
 }

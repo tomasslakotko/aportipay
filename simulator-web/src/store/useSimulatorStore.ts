@@ -638,7 +638,7 @@ export const useSimulatorStore = create<SimulatorStore>((set) => ({
           },
         ]),
       )
-      const openFlights = snapshot.flightStates ? [...snapshot.openFlights] : []
+      const openFlights = [...(snapshot.openFlights ?? [])]
       const activeFlightIndex = Math.max(0, Math.min(snapshot.activeFlightIndex, openFlights.length - 1))
       const flightLabel = openFlights[activeFlightIndex]
       return {

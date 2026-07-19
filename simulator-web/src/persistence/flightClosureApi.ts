@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react'
-import { createClient } from '@supabase/supabase-js'
+import { FIRESTORE_COLLECTIONS, isFirebaseConfigured, subscribeCollection } from './firebaseClient'
+import * as firebaseDb from './firebaseDatabase'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null
 
 export interface FlightClosure {
   id: number
@@ -17,6 +15,8 @@ export interface FlightClosure {
 }
 
 export const fetchFlightClosures = async (): Promise<FlightClosure[]> => {
+  if (isFirebaseConfigured()) return firebaseDb.fetchFlightClosures()
+
   const response = await fetch(`${API_BASE_URL}/api/flight-closures`)
   if (!response.ok) throw new Error(`Unable to load closures: ${response.status}`)
   return response.json() as Promise<FlightClosure[]>
@@ -28,6 +28,10 @@ export const closeFlightGlobally = async (
   closedBy: string,
   closedDevice: string,
 ) => {
+  if (isFirebaseConfigured()) {
+    return firebaseDb.closeFlightGlobally(flightLabel, signatureData, closedBy, closedDevice)
+  }
+
   const response = await fetch(`${API_BASE_URL}/api/flight-closures/${encodeURIComponent(flightLabel)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -38,6 +42,11 @@ export const closeFlightGlobally = async (
 }
 
 export const reopenFlightGlobally = async (flightLabel: string): Promise<void> => {
+  if (isFirebaseConfigured()) {
+    await firebaseDb.reopenFlightGlobally(flightLabel)
+    return
+  }
+
   const response = await fetch(`${API_BASE_URL}/api/flight-closures/${encodeURIComponent(flightLabel)}`, {
     method: 'DELETE',
   })
@@ -61,28 +70,18 @@ export const useLiveFlightClosures = () => {
     }
     void load()
 
+    const unsubscribeFirestore = isFirebaseConfigured()
+      ? subscribeCollection(FIRESTORE_COLLECTIONS.flightClosures, () => { void load() })
+      : undefined
+
     const interval = window.setInterval(() => {
       void load()
     }, 1500)
 
-    let channel:
-      | ReturnType<NonNullable<typeof supabase>['channel']>
-      | undefined
-    try {
-      channel = supabase
-        ?.channel('flight_closures:live')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'flight_closures' }, () => {
-          void load()
-        })
-      if (channel) void channel.subscribe()
-    } catch {
-      channel = undefined
-    }
-
     return () => {
       cancelled = true
       window.clearInterval(interval)
-      if (channel) void supabase?.removeChannel(channel)
+      unsubscribeFirestore?.()
     }
   }, [])
 

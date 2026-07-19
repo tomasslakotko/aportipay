@@ -1,0 +1,8 @@
+{
+  "installCommand": "npm ci --prefix simulator-web",
+  "buildCommand": "npm run build --prefix simulator-web",
+  "outputDirectory": "simulator-web/dist",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

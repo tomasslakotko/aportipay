@@ -4,7 +4,7 @@ import { publishChatMessage, sendChatMessage, useLiveChat } from '../persistence
 import { closeFlightGlobally, useLiveFlightClosures } from '../persistence/flightClosureApi'
 import { playNotificationSound } from '../persistence/notificationSound'
 import { SESSION_SAVE_EVENT } from '../persistence/SessionPersistence'
-import { saveCurrentSession } from '../persistence/sessionApi'
+import { saveWorkspaceSession } from '../persistence/sessionApi'
 import { createSimulatorSnapshot, useSimulatorStore } from '../store/useSimulatorStore'
 
 const allTabs = [
@@ -269,7 +269,7 @@ export function ShellLayout() {
         getDeviceLabel(),
       )
       finalizeActiveFlight(finalizeSignature.trim())
-      await saveCurrentSession(createSimulatorSnapshot(useSimulatorStore.getState()))
+      await saveWorkspaceSession(createSimulatorSnapshot(useSimulatorStore.getState()))
       setFinalizeStatus('success')
     } catch {
       setFinalizeStatus('error')
@@ -400,7 +400,7 @@ export function ShellLayout() {
             onClick={() => {
               showSaveDialog('Saving information...')
               const snapshot = createSimulatorSnapshot(useSimulatorStore.getState())
-              void saveCurrentSession(snapshot)
+              void saveWorkspaceSession(snapshot)
             }}
           >
             <svg aria-hidden="true" viewBox="0 0 24 24">

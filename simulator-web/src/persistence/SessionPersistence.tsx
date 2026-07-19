@@ -1,22 +1,29 @@
 import { useEffect, useRef } from 'react'
-import { createClient } from '@supabase/supabase-js'
+import type { SimulatorSnapshot } from '../store/useSimulatorStore'
 import { createSimulatorSnapshot, useSimulatorStore } from '../store/useSimulatorStore'
-import { fetchLatestSession, getRampSessionId, saveCurrentSession } from './sessionApi'
+import { subscribeWorkspaceSession } from './firebaseClient'
+import {
+  fetchWorkspaceSession,
+  getWorkspaceSessionId,
+  readLocalWorkspaceSnapshot,
+  readLocalWorkspaceUpdatedAt,
+  saveWorkspaceSession,
+  writeLocalWorkspaceSnapshot,
+} from './sessionApi'
 
 const AUTOSAVE_DELAY_MS = 700
 const AUTOREFRESH_INTERVAL_MS = 1500
 const BACKUP_AUTOSAVE_INTERVAL_MS = 2500
 export const SESSION_SAVE_EVENT = 'simulator-session-saving'
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null
+
+const applySnapshot = (snapshot: SimulatorSnapshot | null) => {
+  if (!snapshot) return false
+  if (snapshot.openFlights.length === 0) return false
+  useSimulatorStore.getState().hydrateSession(snapshot)
+  return true
+}
 
 export function SessionPersistence() {
-  const activeFlightLabel = useSimulatorStore((store) => {
-    if (store.openFlights.length === 0) return ''
-    const index = Math.max(0, Math.min(store.activeFlightIndex, store.openFlights.length - 1))
-    return store.openFlights[index] ?? ''
-  })
   const autosaveTimer = useRef<number | undefined>(undefined)
   const refreshTimer = useRef<number | undefined>(undefined)
   const backupSaveTimer = useRef<number | undefined>(undefined)
@@ -24,11 +31,11 @@ export function SessionPersistence() {
   const latestSavedAtMs = useRef<number>(0)
   const hasUnsavedChanges = useRef(false)
   const lastSnapshotHash = useRef('')
+  const workspaceSessionId = getWorkspaceSessionId()
 
   useEffect(() => {
     let cancelled = false
     let unsubscribe: (() => void) | undefined
-    const sessionId = getRampSessionId()
 
     const scheduleSave = () => {
       if (applyingRemoteUpdate.current) return
@@ -44,7 +51,7 @@ export function SessionPersistence() {
           hasUnsavedChanges.current = false
           return
         }
-        void saveCurrentSession(snapshot, sessionId)
+        void saveWorkspaceSession(snapshot)
           .then((record) => {
             latestSavedAtMs.current = Date.parse(record.updatedAt) || Date.now()
             lastSnapshotHash.current = snapshotHash
@@ -56,36 +63,31 @@ export function SessionPersistence() {
       }, AUTOSAVE_DELAY_MS)
     }
 
-    const silentRefresh = async () => {
-      try {
-        const latest = await fetchLatestSession(sessionId)
-        if (!latest?.snapshot) return
-        const remoteUpdatedAtMs = Date.parse(latest.updatedAt)
-        if (!remoteUpdatedAtMs || remoteUpdatedAtMs <= latestSavedAtMs.current) return
-        applyingRemoteUpdate.current = true
-        useSimulatorStore.getState().hydrateSession(latest.snapshot)
-        latestSavedAtMs.current = remoteUpdatedAtMs
-        window.setTimeout(() => {
-          applyingRemoteUpdate.current = false
-        }, 0)
-      } catch (error) {
-        console.warn('Simulator session autorefresh failed', error)
-      }
+    const restoreFromRemote = async () => {
+      const latest = await fetchWorkspaceSession()
+      if (!latest?.snapshot) return
+      const remoteUpdatedAtMs = Date.parse(latest.updatedAt) || 0
+      if (remoteUpdatedAtMs <= latestSavedAtMs.current) return
+      applyingRemoteUpdate.current = true
+      applySnapshot(latest.snapshot)
+      latestSavedAtMs.current = remoteUpdatedAtMs
+      lastSnapshotHash.current = JSON.stringify(latest.snapshot)
+      window.setTimeout(() => {
+        applyingRemoteUpdate.current = false
+      }, 0)
     }
 
     const startPersistence = async () => {
+      const localSnapshot = readLocalWorkspaceSnapshot()
+      const localUpdatedAtMs = readLocalWorkspaceUpdatedAt()
+      if (!cancelled && localSnapshot && applySnapshot(localSnapshot)) {
+        latestSavedAtMs.current = localUpdatedAtMs
+        lastSnapshotHash.current = JSON.stringify(localSnapshot)
+        hasUnsavedChanges.current = false
+      }
+
       try {
-        const latest = await fetchLatestSession(sessionId)
-        if (!cancelled && latest?.snapshot) {
-          applyingRemoteUpdate.current = true
-          useSimulatorStore.getState().hydrateSession(latest.snapshot)
-          latestSavedAtMs.current = Date.parse(latest.updatedAt) || Date.now()
-          lastSnapshotHash.current = JSON.stringify(latest.snapshot)
-          hasUnsavedChanges.current = false
-          window.setTimeout(() => {
-            applyingRemoteUpdate.current = false
-          }, 0)
-        }
+        if (!cancelled) await restoreFromRemote()
       } catch (error) {
         console.warn('Simulator session restore failed', error)
       }
@@ -93,25 +95,12 @@ export function SessionPersistence() {
       if (cancelled) return
 
       unsubscribe = useSimulatorStore.subscribe(scheduleSave)
-      let channel:
-        | ReturnType<NonNullable<typeof supabase>['channel']>
-        | undefined
-      try {
-        channel = supabase
-          ?.channel(`sessions:${encodeURIComponent(sessionId)}`)
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` },
-            () => {
-              void silentRefresh()
-            },
-          )
-        if (channel) void channel.subscribe()
-      } catch {
-        channel = undefined
-      }
+      const unsubscribeFirestore = subscribeWorkspaceSession(workspaceSessionId, () => {
+        void restoreFromRemote()
+      })
+
       refreshTimer.current = window.setInterval(() => {
-        void silentRefresh()
+        void restoreFromRemote()
       }, AUTOREFRESH_INTERVAL_MS)
       backupSaveTimer.current = window.setInterval(() => {
         if (applyingRemoteUpdate.current || !hasUnsavedChanges.current) return
@@ -121,7 +110,7 @@ export function SessionPersistence() {
           hasUnsavedChanges.current = false
           return
         }
-        void saveCurrentSession(snapshot, sessionId)
+        void saveWorkspaceSession(snapshot)
           .then((record) => {
             latestSavedAtMs.current = Date.parse(record.updatedAt) || Date.now()
             lastSnapshotHash.current = snapshotHash
@@ -133,28 +122,20 @@ export function SessionPersistence() {
       }, BACKUP_AUTOSAVE_INTERVAL_MS)
 
       const flushOnExit = () => {
-        if (applyingRemoteUpdate.current || !hasUnsavedChanges.current) return
         const snapshot = createSimulatorSnapshot(useSimulatorStore.getState())
         const snapshotHash = JSON.stringify(snapshot)
-        if (snapshotHash === lastSnapshotHash.current) return
-        void saveCurrentSession(snapshot, sessionId)
-          .then((record) => {
-            latestSavedAtMs.current = Date.parse(record.updatedAt) || Date.now()
-            lastSnapshotHash.current = snapshotHash
-            hasUnsavedChanges.current = false
-          })
-          .catch(() => {})
+        writeLocalWorkspaceSnapshot(snapshot)
+        if (snapshotHash !== lastSnapshotHash.current) {
+          void saveWorkspaceSession(snapshot).catch(() => {})
+        }
       }
       window.addEventListener('visibilitychange', flushOnExit)
       window.addEventListener('pagehide', flushOnExit)
 
-      const cleanupRealtime = () => {
-        if (channel) void supabase?.removeChannel(channel)
-      }
       const existingUnsubscribe = unsubscribe
       unsubscribe = () => {
         existingUnsubscribe?.()
-        cleanupRealtime()
+        unsubscribeFirestore?.()
         window.removeEventListener('visibilitychange', flushOnExit)
         window.removeEventListener('pagehide', flushOnExit)
       }
@@ -169,7 +150,7 @@ export function SessionPersistence() {
       window.clearInterval(backupSaveTimer.current)
       unsubscribe?.()
     }
-  }, [activeFlightLabel])
+  }, [workspaceSessionId])
 
   return null
 }
