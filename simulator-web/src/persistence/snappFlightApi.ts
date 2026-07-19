@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react'
 import type { AdminFlight } from './flightApi'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
+const rawApiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim()
+/** Empty on Vercel → same-origin `/api/snapp/*` serverless. Local .env usually points at :8787. */
+const API_BASE_URL =
+  rawApiBase ||
+  (import.meta.env.DEV ? 'http://localhost:8787' : '')
 const FALLBACK_PUBLIC_URL =
   (import.meta.env.VITE_SNAPP_PUBLIC_URL as string | undefined)?.replace(/\/$/, '') ||
   'https://snapp-ops.vercel.app'
