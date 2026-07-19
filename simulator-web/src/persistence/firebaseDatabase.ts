@@ -33,7 +33,10 @@ export interface AdminFlight {
   status: string
   aircraft: string
   controller: string
-  source?: 'aportipay' | 'aa-lids'
+  source?: 'aportipay' | 'aa-lids' | 'snapp' | 'local'
+  gate?: string
+  boardingTime?: string
+  delayMinutes?: number
   createdAt: string
   updatedAt: string
 }
