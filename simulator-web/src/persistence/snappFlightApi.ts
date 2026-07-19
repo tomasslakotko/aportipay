@@ -71,15 +71,20 @@ export const useLiveSnappFlights = (enabled: boolean) => {
     let cancelled = false
 
     const load = async () => {
+      // Config and flights are independent — a flights error must not hide "configured".
+      const cfg = await fetchSnappConfig()
+      if (cancelled) return
+      setConfigured(cfg.configured)
+      setPublicBaseUrl(cfg.publicBaseUrl)
+
       try {
-        const [cfg, data] = await Promise.all([fetchSnappConfig(), fetchSnappFlights()])
+        const data = await fetchSnappFlights()
         if (cancelled) return
-        setConfigured(cfg.configured)
-        setPublicBaseUrl(cfg.publicBaseUrl)
         setFlights(data)
         setError('')
       } catch (err) {
         if (cancelled) return
+        setFlights([])
         setError(err instanceof Error ? err.message : 'Failed to load SNAPP flights.')
       }
     }
