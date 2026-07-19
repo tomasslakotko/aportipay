@@ -1143,6 +1143,9 @@ export function PassengerModule() {
         aaLidsFlightId: snappFlightId || aaLidsFlightId,
         finalised,
       })
+      if (finalised && snappFlightId) {
+        await patchSnappFlight(snappFlightId, { checkin_closed: true })
+      }
     } catch (error) {
       console.warn('Unable to sync passenger acceptance status', error)
     }

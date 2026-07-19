@@ -183,6 +183,9 @@ app.patch('/api/snapp/flights/:id', async (req, res) => {
     gate_arrival?: string
     boarding_time?: string
     delay_minutes?: number
+    boarding_closed?: boolean
+    checkin_closed?: boolean
+    ops_finalised?: boolean
   } = {}
   if (typeof body.status === 'string') patch.status = body.status
   if (typeof body.gate_departure === 'string') patch.gate_departure = body.gate_departure
@@ -191,9 +194,13 @@ app.patch('/api/snapp/flights/:id', async (req, res) => {
   if (typeof body.delay_minutes === 'number' && Number.isFinite(body.delay_minutes)) {
     patch.delay_minutes = body.delay_minutes
   }
+  if (typeof body.boarding_closed === 'boolean') patch.boarding_closed = body.boarding_closed
+  if (typeof body.checkin_closed === 'boolean') patch.checkin_closed = body.checkin_closed
+  if (typeof body.ops_finalised === 'boolean') patch.ops_finalised = body.ops_finalised
   if (Object.keys(patch).length === 0) {
     res.status(400).json({
-      error: 'Provide at least one of: status, gate_departure, gate_arrival, boarding_time, delay_minutes',
+      error:
+        'Provide at least one of: status, gate_departure, gate_arrival, boarding_time, delay_minutes, boarding_closed, checkin_closed, ops_finalised',
     })
     return
   }

@@ -48,6 +48,9 @@ export const patchSnappFlight = async (
     gate_arrival?: string
     boarding_time?: string
     delay_minutes?: number
+    boarding_closed?: boolean
+    checkin_closed?: boolean
+    ops_finalised?: boolean
   },
 ): Promise<AdminFlight> => {
   const base = resolveSnappApiBase()

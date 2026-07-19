@@ -132,6 +132,9 @@ export async function patchSnappFlightUpstream(
     gate_arrival?: string
     boarding_time?: string
     delay_minutes?: number
+    boarding_closed?: boolean
+    checkin_closed?: boolean
+    ops_finalised?: boolean
   },
 ): Promise<AdminFlight> {
   const base = (process.env.SNAPP_BASE_URL ?? '').replace(/\/$/, '')

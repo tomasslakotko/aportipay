@@ -4,10 +4,10 @@ import { publishChatMessage, sendChatMessage, useLiveChat } from '../persistence
 import { closeFlightGlobally, useLiveFlightClosures } from '../persistence/flightClosureApi'
 import { playNotificationSound } from '../persistence/notificationSound'
 import { resolveSnappFlightId } from '../persistence/snappPassengerSync'
-import { useLiveSnappFlights } from '../persistence/snappFlightApi'
+import { patchSnappFlight, useLiveSnappFlights } from '../persistence/snappFlightApi'
 import { SESSION_SAVE_EVENT } from '../persistence/SessionPersistence'
 import { saveWorkspaceSession } from '../persistence/sessionApi'
-import { createSimulatorSnapshot, useSimulatorStore } from '../store/useSimulatorStore'
+import { createPassengerState, createSimulatorSnapshot, useSimulatorStore } from '../store/useSimulatorStore'
 
 const allTabs = [
   { to: '/', label: 'Ramp' },
@@ -277,8 +277,34 @@ export function ShellLayout() {
         getDeviceLabel(),
       )
       finalizeActiveFlight(finalizeSignature.trim())
+      if (activeSnappFlightId) {
+        await patchSnappFlight(activeSnappFlightId, {
+          ops_finalised: true,
+          status: 'Finalised',
+        })
+      }
       await saveWorkspaceSession(createSimulatorSnapshot(useSimulatorStore.getState()))
       setFinalizeStatus('success')
+    } catch {
+      setFinalizeStatus('error')
+    }
+  }
+
+  const closeAcceptanceOnly = async () => {
+    if (!activeFlight) return
+    setFinalizeStatus('closing')
+    showSaveDialog('Closing acceptance...')
+    try {
+      if (activeSnappFlightId) {
+        await patchSnappFlight(activeSnappFlightId, {
+          checkin_closed: true,
+        })
+      }
+      const store = useSimulatorStore.getState()
+      store.setPassenger(createPassengerState({ ...store.state.passenger, finalised: true }))
+      await saveWorkspaceSession(createSimulatorSnapshot(useSimulatorStore.getState()))
+      setFinalizeStatus('success')
+      setSaveDialogMessage('Acceptance closed — check-in locked on SNAPP')
     } catch {
       setFinalizeStatus('error')
     }
@@ -629,8 +655,16 @@ export function ShellLayout() {
               <div className="finalize-status"><span className="save-spinner" /><strong>Closing flight...</strong></div>
             ) : finalizeStatus === 'success' ? (
               <div className="finalize-status success">
-                <strong>Flight closed successfully.</strong>
-                <p>{activeFlight} is now locked. Admin must unlock it before changes are allowed.</p>
+                <strong>
+                  {saveDialogMessage?.includes('Acceptance')
+                    ? 'Acceptance closed.'
+                    : 'Flight finalised successfully.'}
+                </strong>
+                <p>
+                  {saveDialogMessage?.includes('Acceptance')
+                    ? `${activeFlight}: check-in locked on SNAPP. Boarding may continue.`
+                    : `${activeFlight} is locked — no boarding, no check-in.`}
+                </p>
                 <button type="button" onClick={() => setFinalizeDialogOpen(false)}>Close</button>
               </div>
             ) : finalizeStatus === 'error' ? (
@@ -641,7 +675,11 @@ export function ShellLayout() {
               </div>
             ) : (
               <>
-                <p>Enter your signature to close and lock this flight.</p>
+                <p>
+                  {activeSnappFlightId
+                    ? 'SNAPP Ops flight: Finalise locks boarding + check-in. Close acceptance locks check-in only.'
+                    : 'Enter your signature to close and lock this flight.'}
+                </p>
                 <label>
                   Signature
                   <canvas
@@ -683,8 +721,15 @@ export function ShellLayout() {
                 </div>
                 <footer>
                   <button type="button" onClick={() => setFinalizeDialogOpen(false)}>Cancel</button>
+                  <button
+                    type="button"
+                    onClick={() => void closeAcceptanceOnly()}
+                    title="Locks check-in / passenger acceptance on SNAPP"
+                  >
+                    Close acceptance
+                  </button>
                   <button type="button" disabled={!finalizeSignature.trim()} onClick={() => void closeFlight()}>
-                    Close Flight
+                    Finalise
                   </button>
                 </footer>
               </>
