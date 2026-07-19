@@ -20,6 +20,10 @@ import {
   resolveAaLidsFlightId,
 } from '../persistence/aaLidsPassengerSync'
 import {
+  loadSnappPassengerState,
+  resolveSnappFlightId,
+} from '../persistence/snappPassengerSync'
+import {
   fetchPassengerAcceptanceFinalised,
   setPassengerAcceptanceFinalised,
   subscribePassengerAcceptanceFinalised,
@@ -1002,11 +1006,13 @@ export function MessengerModule() {
 export function PassengerModule() {
   const { state, setPassenger, openFlights, activeFlightIndex } = useSimulatorStore()
   const { flights: adminFlights } = useLiveFlights()
+  const { flights: snappFlights } = useLiveSnappFlights(true)
   const [draft, setDraft] = useState(() => createPassengerState(state.passenger))
   const [activeSection, setActiveSection] = useState('Booked Passengers')
-  const [aaLidsSyncNote, setAaLidsSyncNote] = useState('')
+  const [passengerSyncNote, setPassengerSyncNote] = useState('')
   const activeFlightLabel = openFlights[Math.max(0, Math.min(activeFlightIndex, openFlights.length - 1))] ?? ''
   const aaLidsFlightId = resolveAaLidsFlightId(activeFlightLabel, adminFlights)
+  const snappFlightId = resolveSnappFlightId(activeFlightLabel, snappFlights)
   const destination = state.route.split('-')[1] || state.route || 'Not set'
   const bookedTotal = draft.booked.first + draft.booked.business + draft.booked.economy
   const transitTotal = draft.transit.first + draft.transit.business + draft.transit.economy
@@ -1018,8 +1024,38 @@ export function PassengerModule() {
   }, [state.passenger])
 
   useEffect(() => {
+    if (snappFlightId) {
+      let cancelled = false
+      const syncFromSnapp = async () => {
+        try {
+          const synced = await loadSnappPassengerState(snappFlightId)
+          if (cancelled || !synced) {
+            if (!cancelled) setPassengerSyncNote('No passengers found in SNAPP for this flight.')
+            return
+          }
+          const finalised = await fetchPassengerAcceptanceFinalised(activeFlightLabel, snappFlightId)
+          const merged = createPassengerState({ ...synced, finalised })
+          setDraft(merged)
+          setPassenger(merged)
+          const booked =
+            synced.booked.first + synced.booked.business + synced.booked.economy
+          setPassengerSyncNote(
+            `Loaded from SNAPP Ops · ${booked} booked · ${synced.acceptedPax} accepted · ${synced.acceptedBags} bags`,
+          )
+        } catch (error) {
+          if (!cancelled) {
+            setPassengerSyncNote(error instanceof Error ? error.message : 'Could not load SNAPP passengers.')
+          }
+        }
+      }
+      void syncFromSnapp()
+      return () => {
+        cancelled = true
+      }
+    }
+
     if (!aaLidsFlightId || !isFirebaseConfigured()) {
-      setAaLidsSyncNote('')
+      setPassengerSyncNote('')
       return
     }
 
@@ -1028,17 +1064,17 @@ export function PassengerModule() {
       try {
         const synced = await loadAaLidsPassengerState(aaLidsFlightId)
         if (cancelled || !synced) {
-          if (!cancelled) setAaLidsSyncNote('No passengers found in aa-lids for this flight.')
+          if (!cancelled) setPassengerSyncNote('No passengers found in aa-lids for this flight.')
           return
         }
         const finalised = await fetchPassengerAcceptanceFinalised(activeFlightLabel, aaLidsFlightId)
         const merged = createPassengerState({ ...synced, finalised })
         setDraft(merged)
         setPassenger(merged)
-        setAaLidsSyncNote('Passenger and baggage counts loaded from aa-lids.')
+        setPassengerSyncNote('Passenger and baggage counts loaded from aa-lids.')
       } catch (error) {
         if (!cancelled) {
-          setAaLidsSyncNote(error instanceof Error ? error.message : 'Could not load aa-lids passengers.')
+          setPassengerSyncNote(error instanceof Error ? error.message : 'Could not load aa-lids passengers.')
         }
       }
     }
@@ -1054,7 +1090,7 @@ export function PassengerModule() {
       cancelled = true
       unsubscribe?.()
     }
-  }, [aaLidsFlightId, setPassenger])
+  }, [aaLidsFlightId, snappFlightId, activeFlightLabel, setPassenger])
 
   const updateCabin = (section: 'booked' | 'transit', key: 'first' | 'business' | 'economy', value: number) => {
     setDraft((current) => ({
@@ -1093,7 +1129,7 @@ export function PassengerModule() {
     try {
       await setPassengerAcceptanceFinalised({
         flightLabel: activeFlightLabel,
-        aaLidsFlightId,
+        aaLidsFlightId: snappFlightId || aaLidsFlightId,
         finalised,
       })
     } catch (error) {
@@ -1119,13 +1155,13 @@ export function PassengerModule() {
       store.setPassenger(createPassengerState({ ...store.state.passenger, finalised }))
     }
 
-    void fetchPassengerAcceptanceFinalised(activeFlightLabel, aaLidsFlightId)
+    void fetchPassengerAcceptanceFinalised(activeFlightLabel, snappFlightId || aaLidsFlightId)
       .then(applyFinalised)
       .catch(() => {})
 
     const unsubscribe = subscribePassengerAcceptanceFinalised(
       activeFlightLabel,
-      aaLidsFlightId,
+      snappFlightId || aaLidsFlightId,
       applyFinalised,
     )
 
@@ -1133,7 +1169,7 @@ export function PassengerModule() {
       cancelled = true
       unsubscribe?.()
     }
-  }, [activeFlightLabel, aaLidsFlightId])
+  }, [activeFlightLabel, aaLidsFlightId, snappFlightId])
 
   return (
     <section className="module-card passenger-screen">
@@ -1178,7 +1214,7 @@ export function PassengerModule() {
         </nav>
       </aside>
       <div className="passenger-main">
-        {aaLidsSyncNote ? <p className="search-note">{aaLidsSyncNote}</p> : null}
+        {passengerSyncNote ? <p className="search-note">{passengerSyncNote}</p> : null}
         {draft.finalised ? (
           <p className="search-note">Passenger acceptance is finalised. Agents cannot add new passengers in aa-lids.</p>
         ) : null}

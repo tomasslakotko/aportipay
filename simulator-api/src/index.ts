@@ -25,6 +25,7 @@ import {
 import {
   fetchSnappFlightFromUpstream,
   fetchSnappFlightsFromUpstream,
+  fetchSnappPassengersFromUpstream,
   patchSnappFlightUpstream,
   snappPublicBaseUrl,
 } from './snapp.js'
@@ -121,6 +122,16 @@ app.get('/api/snapp/flights/:id', async (req, res) => {
     res.json(await fetchSnappFlightFromUpstream(req.params.id))
   } catch (err) {
     const message = err instanceof Error ? err.message : 'SNAPP get failed'
+    const status = message.includes('404') || message.toLowerCase().includes('not found') ? 404 : 502
+    res.status(status).json({ error: message })
+  }
+})
+
+app.get('/api/snapp/flights/:id/passengers', async (req, res) => {
+  try {
+    res.json(await fetchSnappPassengersFromUpstream(req.params.id))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SNAPP passengers failed'
     const status = message.includes('404') || message.toLowerCase().includes('not found') ? 404 : 502
     res.status(status).json({ error: message })
   }

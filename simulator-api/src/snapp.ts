@@ -160,6 +160,24 @@ export async function patchSnappFlightUpstream(
   return mapSnappFlightToAdmin(payload.flight)
 }
 
+export async function fetchSnappPassengersFromUpstream(id: string): Promise<unknown> {
+  const base = (process.env.SNAPP_BASE_URL ?? '').replace(/\/$/, '')
+  const key = process.env.SNAPP_API_KEY?.trim()
+  if (!base || !key) {
+    throw new Error('SNAPP_BASE_URL and SNAPP_API_KEY must be set on simulator-api')
+  }
+
+  const response = await fetch(
+    `${base}/api/integration/flights/${encodeURIComponent(id)}/passengers`,
+    { headers: { 'x-snapp-api-key': key } },
+  )
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`SNAPP passengers failed (${response.status}): ${text.slice(0, 200)}`)
+  }
+  return response.json()
+}
+
 export function snappPublicBaseUrl() {
   return (process.env.SNAPP_PUBLIC_URL || process.env.SNAPP_BASE_URL || 'https://snapp-ops.vercel.app').replace(
     /\/$/,
