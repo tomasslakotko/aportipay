@@ -23,10 +23,12 @@ import {
   upsertSession,
 } from './db.js'
 import {
+  fetchSnappConversationsFromUpstream,
   fetchSnappFlightFromUpstream,
   fetchSnappFlightsFromUpstream,
   fetchSnappPassengersFromUpstream,
   patchSnappFlightUpstream,
+  postSnappConversationUpstream,
   snappPublicBaseUrl,
 } from './snapp.js'
 
@@ -134,6 +136,42 @@ app.get('/api/snapp/flights/:id/passengers', async (req, res) => {
     const message = err instanceof Error ? err.message : 'SNAPP passengers failed'
     const status = message.includes('404') || message.toLowerCase().includes('not found') ? 404 : 502
     res.status(status).json({ error: message })
+  }
+})
+
+app.get('/api/snapp/flights/:id/conversations', async (req, res) => {
+  try {
+    res.json(await fetchSnappConversationsFromUpstream(req.params.id))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SNAPP conversations failed'
+    const status = message.includes('404') || message.toLowerCase().includes('not found') ? 404 : 502
+    res.status(status).json({ error: message })
+  }
+})
+
+app.post('/api/snapp/flights/:id/conversations', async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {}
+  const text = typeof body.body === 'string' ? body.body.trim() : ''
+  if (!text) {
+    res.status(400).json({ error: 'body is required' })
+    return
+  }
+  try {
+    res.status(201).json(
+      await postSnappConversationUpstream(req.params.id, {
+        body: text,
+        authorId: typeof body.authorId === 'string' ? body.authorId : undefined,
+        authorRole: typeof body.authorRole === 'string' ? body.authorRole : undefined,
+        priority: body.priority === 'normal' || body.priority === 'high' ? body.priority : undefined,
+        recipients: Array.isArray(body.recipients)
+          ? body.recipients.filter((item): item is string => typeof item === 'string')
+          : undefined,
+        source: typeof body.source === 'string' ? body.source : 'airportpay',
+      }),
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SNAPP conversation create failed'
+    res.status(502).json({ error: message })
   }
 })
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Message } from '../domain/types'
 import { FIRESTORE_COLLECTIONS, isFirebaseConfigured, subscribeCollection } from './firebaseClient'
 import * as firebaseDb from './firebaseDatabase'
+import { fetchSnappConversations, sendSnappConversation } from './snappConversationSync'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787'
 
@@ -9,7 +10,13 @@ export interface ChatMessage extends Message {
   flightLabel: string
 }
 
-export const fetchChatMessages = async (flightLabel: string): Promise<ChatMessage[]> => {
+export const fetchChatMessages = async (
+  flightLabel: string,
+  snappFlightId?: string | null,
+): Promise<ChatMessage[]> => {
+  if (snappFlightId) {
+    return fetchSnappConversations(snappFlightId, flightLabel)
+  }
   if (isFirebaseConfigured()) return firebaseDb.fetchChatMessages(flightLabel)
 
   const response = await fetch(`${API_BASE_URL}/api/chat/messages?flightLabel=${encodeURIComponent(flightLabel)}`)
@@ -23,7 +30,18 @@ export const sendChatMessage = async (input: {
   text: string
   recipient: string
   priority: 'low' | 'medium' | 'high'
+  snappFlightId?: string | null
 }): Promise<ChatMessage> => {
+  if (input.snappFlightId) {
+    return sendSnappConversation({
+      flightId: input.snappFlightId,
+      flightLabel: input.flightLabel,
+      author: input.author,
+      text: input.text,
+      recipient: input.recipient,
+      priority: input.priority,
+    })
+  }
   if (isFirebaseConfigured()) return firebaseDb.sendChatMessage(input)
 
   const response = await fetch(`${API_BASE_URL}/api/chat/messages`, {
@@ -45,7 +63,11 @@ export const publishChatMessage = async (id: string): Promise<ChatMessage> => {
   return response.json() as Promise<ChatMessage>
 }
 
-export const useLiveChat = (flightLabel: string, enabled = true) => {
+export const useLiveChat = (
+  flightLabel: string,
+  enabled = true,
+  snappFlightId?: string | null,
+) => {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [error, setError] = useState('')
 
@@ -59,7 +81,7 @@ export const useLiveChat = (flightLabel: string, enabled = true) => {
     let cancelled = false
     const load = async () => {
       try {
-        const data = await fetchChatMessages(flightLabel)
+        const data = await fetchChatMessages(flightLabel, snappFlightId)
         if (!cancelled) {
           setMessages(data)
           setError('')
@@ -73,31 +95,32 @@ export const useLiveChat = (flightLabel: string, enabled = true) => {
 
     void load()
 
-    const unsubscribeFirestore = isFirebaseConfigured()
-      ? subscribeCollection(
-          FIRESTORE_COLLECTIONS.chatMessages,
-          () => { void load() },
-          { field: 'flightLabel', value: flightLabel },
-        )
-      : undefined
+    const unsubscribeFirestore =
+      !snappFlightId && isFirebaseConfigured()
+        ? subscribeCollection(
+            FIRESTORE_COLLECTIONS.chatMessages,
+            () => { void load() },
+            { field: 'flightLabel', value: flightLabel },
+          )
+        : undefined
 
     const interval = window.setInterval(() => {
       void load()
-    }, 1500)
+    }, snappFlightId ? 3000 : 1500)
 
     return () => {
       cancelled = true
       window.clearInterval(interval)
       unsubscribeFirestore?.()
     }
-  }, [enabled, flightLabel])
+  }, [enabled, flightLabel, snappFlightId])
 
   return {
     messages,
     error,
     refresh: async () => {
       try {
-        setMessages(await fetchChatMessages(flightLabel))
+        setMessages(await fetchChatMessages(flightLabel, snappFlightId))
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to refresh chat.')
       }

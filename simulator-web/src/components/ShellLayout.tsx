@@ -3,6 +3,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { publishChatMessage, sendChatMessage, useLiveChat } from '../persistence/chatApi'
 import { closeFlightGlobally, useLiveFlightClosures } from '../persistence/flightClosureApi'
 import { playNotificationSound } from '../persistence/notificationSound'
+import { resolveSnappFlightId } from '../persistence/snappPassengerSync'
+import { useLiveSnappFlights } from '../persistence/snappFlightApi'
 import { SESSION_SAVE_EVENT } from '../persistence/SessionPersistence'
 import { saveWorkspaceSession } from '../persistence/sessionApi'
 import { createSimulatorSnapshot, useSimulatorStore } from '../store/useSimulatorStore'
@@ -144,7 +146,13 @@ export function ShellLayout() {
     : menuTiles.filter((tile) => !('to' in tile && (tile.to === '/admin' || tile.to === '/accounts')))
   const globallyClosedLabels = new Set(closures.map((closure) => closure.flightLabel))
   const activeFlight = openFlights[activeFlightIndex]
-  const { messages: liveMessages, refresh: refreshLiveMessages } = useLiveChat(activeFlight ?? '', Boolean(activeFlight))
+  const { flights: snappFlights } = useLiveSnappFlights(Boolean(activeFlight))
+  const activeSnappFlightId = activeFlight ? resolveSnappFlightId(activeFlight, snappFlights) : null
+  const { messages: liveMessages, refresh: refreshLiveMessages } = useLiveChat(
+    activeFlight ?? '',
+    Boolean(activeFlight),
+    activeSnappFlightId,
+  )
   const shortCommands = getShortCommandsForRole(loginRole || 'ramp agent')
   const currentSeenTs = activeFlight ? (lastSeenByFlight[activeFlight] ?? 0) : 0
   const unreadCount = activeFlight
@@ -478,7 +486,7 @@ export function ShellLayout() {
         <div className="flight-message-popup" role="dialog" aria-label="Flight messenger pop-up">
           <header>
             <strong>⚠ Messenger</strong>
-            <span>NOT THE CURRENT FLIGHT</span>
+            <span>{activeSnappFlightId ? 'SNAPP Ops' : 'Active flight'}</span>
             <button type="button" onClick={() => setFlightMessengerOpen(false)}>
               ×
             </button>
@@ -569,6 +577,7 @@ export function ShellLayout() {
                   text: trimmed,
                   recipient: flightMessageRecipient,
                   priority: flightMessageRecipient === 'Ramp' ? 'high' : flightMessagePriority,
+                  snappFlightId: activeSnappFlightId,
                 })
                   .then(() => refreshLiveMessages())
                   .then(() => setFlightMessageText(''))

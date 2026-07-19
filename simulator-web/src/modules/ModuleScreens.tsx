@@ -843,6 +843,7 @@ export function MessengerModule() {
   const [recipient, setRecipient] = useState('Ramp')
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('high')
   const { flights: liveFlights } = useLiveFlights()
+  const { flights: snappFlights } = useLiveSnappFlights(true)
   const { closures } = useLiveFlightClosures()
   const globallyClosedLabels = new Set(closures.map((closure) => closure.flightLabel))
   const liveFlightLabels = liveFlights
@@ -858,7 +859,12 @@ export function MessengerModule() {
       : []
   ).filter((flightLabel) => !globallyClosedLabels.has(flightLabel))
   const [selectedFlight, setSelectedFlight] = useState(activeFlight)
-  const { messages: selectedMessages, error: chatError, refresh } = useLiveChat(selectedFlight, Boolean(selectedFlight))
+  const selectedSnappFlightId = resolveSnappFlightId(selectedFlight, snappFlights)
+  const { messages: selectedMessages, error: chatError, refresh } = useLiveChat(
+    selectedFlight,
+    Boolean(selectedFlight),
+    selectedSnappFlightId,
+  )
   const shortCommands = getShortCommandsForRole(profile.role)
   const lastMessageTap = useRef<{ id: string; time: number } | null>(null)
 
@@ -913,6 +919,9 @@ export function MessengerModule() {
         </aside>
         <div className="messenger-main">
           <div className="message-list">
+            {selectedSnappFlightId ? (
+              <div className="empty-message-state">Linked to SNAPP Flight Conversations</div>
+            ) : null}
             {selectedMessages.length === 0 ? (
               <div className="empty-message-state">No real messages for this flight yet.</div>
             ) : (
@@ -989,6 +998,7 @@ export function MessengerModule() {
                   text: text.trim(),
                   recipient,
                   priority: recipient === 'Ramp' ? 'high' : priority,
+                  snappFlightId: selectedSnappFlightId,
                 })
                 await refresh()
                 setText('')
