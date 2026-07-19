@@ -26,6 +26,13 @@ import {
 } from '../persistence/passengerAcceptance'
 import { isFirebaseConfigured, subscribeCollection, FIRESTORE_COLLECTIONS } from '../persistence/firebaseClient'
 import { createFlight as createAdminFlight, deleteFlight, useLiveFlights } from '../persistence/flightApi'
+import {
+  patchSnappFlight,
+  snappBoardingUrl,
+  snappFlightUrl,
+  useLiveSnappFlights,
+  type FlightCatalogSource,
+} from '../persistence/snappFlightApi'
 import { createFlightState, createPassengerState, useSimulatorStore } from '../store/useSimulatorStore'
 
 const loginRoles = [
@@ -1514,10 +1521,41 @@ const emptyAdminFlight: NewAdminFlight = {
 
 export function AdminModule() {
   const { unlockFlight } = useSimulatorStore()
+  const [catalogSource, setCatalogSource] = useState<FlightCatalogSource>('local')
   const [form, setForm] = useState<NewAdminFlight>(emptyAdminFlight)
   const [status, setStatus] = useState('Ready')
-  const { flights, error: flightsError, refresh: refreshFlights } = useLiveFlights()
+  const [editDrafts, setEditDrafts] = useState<
+    Record<string, { status: string; gate: string; boardingTime: string; delayMinutes: string }>
+  >({})
+  const { flights: localFlights, error: localError, refresh: refreshLocal } = useLiveFlights()
+  const {
+    flights: snappFlights,
+    error: snappError,
+    configured: snappConfigured,
+    publicBaseUrl,
+    refresh: refreshSnapp,
+  } = useLiveSnappFlights(catalogSource === 'snapp')
   const { closures } = useLiveFlightClosures()
+
+  const flights = catalogSource === 'snapp' ? snappFlights : localFlights
+  const flightsError = catalogSource === 'snapp' ? snappError : localError
+
+  useEffect(() => {
+    if (catalogSource !== 'snapp') return
+    setEditDrafts(
+      Object.fromEntries(
+        snappFlights.map((flight) => [
+          flight.id,
+          {
+            status: flight.status,
+            gate: flight.gate ?? '',
+            boardingTime: flight.boardingTime ?? '',
+            delayMinutes: String(flight.delayMinutes ?? 0),
+          },
+        ]),
+      ),
+    )
+  }, [catalogSource, snappFlights])
 
   const updateField = (field: keyof NewAdminFlight, value: string) => {
     setForm((current) => ({ ...current, [field]: value }))
@@ -1527,7 +1565,7 @@ export function AdminModule() {
     setStatus('Saving...')
     try {
       const saved = await createAdminFlight(form)
-      await refreshFlights()
+      await refreshLocal()
       setForm({ ...emptyAdminFlight, date: form.date })
       setStatus(`Saved ${saved.carrier} ${saved.flightNo}`)
     } catch {
@@ -1539,10 +1577,28 @@ export function AdminModule() {
     setStatus('Deleting...')
     try {
       await deleteFlight(id)
-      await refreshFlights()
+      await refreshLocal()
       setStatus('Deleted')
     } catch {
       setStatus('Could not delete flight.')
+    }
+  }
+
+  const saveSnappFlight = async (id: string) => {
+    const draft = editDrafts[id]
+    if (!draft) return
+    setStatus('Updating SNAPP...')
+    try {
+      await patchSnappFlight(id, {
+        status: draft.status,
+        gate_departure: draft.gate,
+        boarding_time: draft.boardingTime,
+        delay_minutes: Number(draft.delayMinutes) || 0,
+      })
+      await refreshSnapp()
+      setStatus('SNAPP flight updated')
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : 'Could not update SNAPP flight.')
     }
   }
 
@@ -1550,34 +1606,63 @@ export function AdminModule() {
     <section className="module-card admin-module">
       <h3>Admin Control</h3>
       <p className="search-note">
-        Add flights here. They are saved in Firebase and become available in Search.
+        Local / aa-lids flights stay in Firebase. Switch to SNAPP Ops to edit live snapp-ops flights (status / gate).
       </p>
+      <div className="search-bar" style={{ marginBottom: '12px' }}>
+        <label>
+          Flight source
+          <select
+            value={catalogSource}
+            onChange={(event) => setCatalogSource(event.target.value as FlightCatalogSource)}
+          >
+            <option value="local">Local / aa-lids</option>
+            <option value="snapp">SNAPP Ops</option>
+          </select>
+        </label>
+        {catalogSource === 'snapp' ? (
+          <p className="search-note" style={{ alignSelf: 'end' }}>
+            {snappConfigured
+              ? `Linked · ${publicBaseUrl}`
+              : 'Set SNAPP_BASE_URL + SNAPP_API_KEY on simulator-api'}
+          </p>
+        ) : null}
+      </div>
       <div className="admin-grid">
-        <form
-          className="admin-form"
-          onSubmit={(event) => {
-            event.preventDefault()
-            void submitFlight()
-          }}
-        >
-          <label>Carrier<input value={form.carrier} onChange={(event) => updateField('carrier', event.target.value)} /></label>
-          <label>Flight No<input value={form.flightNo} onChange={(event) => updateField('flightNo', event.target.value)} required /></label>
-          <label>Date<input type="date" value={form.date} onChange={(event) => updateField('date', event.target.value)} required /></label>
-          <label>Departure<input value={form.dep} onChange={(event) => updateField('dep', event.target.value)} required /></label>
-          <label>Arrival<input value={form.arr} onChange={(event) => updateField('arr', event.target.value)} required /></label>
-          <label>Time<input type="time" value={form.time} onChange={(event) => updateField('time', event.target.value)} required /></label>
-          <label>Status<input value={form.status} onChange={(event) => updateField('status', event.target.value)} /></label>
-          <label>Aircraft<input value={form.aircraft} onChange={(event) => updateField('aircraft', event.target.value)} /></label>
-          <label>Load Controller<input value={form.controller} onChange={(event) => updateField('controller', event.target.value)} /></label>
-          <button type="submit">Add Flight</button>
-          <p>{status}</p>
-        </form>
+        {catalogSource === 'local' ? (
+          <form
+            className="admin-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void submitFlight()
+            }}
+          >
+            <label>Carrier<input value={form.carrier} onChange={(event) => updateField('carrier', event.target.value)} /></label>
+            <label>Flight No<input value={form.flightNo} onChange={(event) => updateField('flightNo', event.target.value)} required /></label>
+            <label>Date<input type="date" value={form.date} onChange={(event) => updateField('date', event.target.value)} required /></label>
+            <label>Departure<input value={form.dep} onChange={(event) => updateField('dep', event.target.value)} required /></label>
+            <label>Arrival<input value={form.arr} onChange={(event) => updateField('arr', event.target.value)} required /></label>
+            <label>Time<input type="time" value={form.time} onChange={(event) => updateField('time', event.target.value)} required /></label>
+            <label>Status<input value={form.status} onChange={(event) => updateField('status', event.target.value)} /></label>
+            <label>Aircraft<input value={form.aircraft} onChange={(event) => updateField('aircraft', event.target.value)} /></label>
+            <label>Load Controller<input value={form.controller} onChange={(event) => updateField('controller', event.target.value)} /></label>
+            <button type="submit">Add Flight</button>
+            <p>{status}</p>
+          </form>
+        ) : (
+          <div className="admin-form">
+            <h4>SNAPP Ops</h4>
+            <p className="search-note">
+              Edit status and departure gate, then Save. Use Boarding / Details to open SNAPP.
+            </p>
+            <p>{status}</p>
+          </div>
+        )}
         <div className="admin-list">
           {flightsError ? <p>{flightsError}</p> : null}
-          <h4>Saved Flights</h4>
+          <h4>{catalogSource === 'snapp' ? 'SNAPP Flights' : 'Saved Flights'}</h4>
           {flights.length === 0 ? (
-            <p>No admin flights yet.</p>
-          ) : (
+            <p>{catalogSource === 'snapp' ? 'No SNAPP flights loaded.' : 'No admin flights yet.'}</p>
+          ) : catalogSource === 'local' ? (
             <table className="search-table">
               <thead>
                 <tr><th>Flight</th><th>Date</th><th>Route</th><th>Time</th><th>Status</th><th>Aircraft</th><th /></tr>
@@ -1594,6 +1679,93 @@ export function AdminModule() {
                     <td><button type="button" onClick={() => void removeFlight(flight.id)}>Delete</button></td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          ) : (
+            <table className="search-table">
+              <thead>
+                <tr>
+                  <th>Flight</th>
+                  <th>Route</th>
+                  <th>Status</th>
+                  <th>Gate</th>
+                  <th>Boarding</th>
+                  <th>Delay</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {flights.map((flight) => {
+                  const draft = editDrafts[flight.id] ?? {
+                    status: flight.status,
+                    gate: flight.gate ?? '',
+                    boardingTime: flight.boardingTime ?? '',
+                    delayMinutes: String(flight.delayMinutes ?? 0),
+                  }
+                  return (
+                    <tr key={flight.id}>
+                      <td>{flight.carrier} {flight.flightNo}</td>
+                      <td>{flight.dep}-{flight.arr}</td>
+                      <td>
+                        <input
+                          value={draft.status}
+                          onChange={(event) =>
+                            setEditDrafts((current) => ({
+                              ...current,
+                              [flight.id]: { ...draft, status: event.target.value },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          value={draft.gate}
+                          onChange={(event) =>
+                            setEditDrafts((current) => ({
+                              ...current,
+                              [flight.id]: { ...draft, gate: event.target.value },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          value={draft.boardingTime}
+                          onChange={(event) =>
+                            setEditDrafts((current) => ({
+                              ...current,
+                              [flight.id]: { ...draft, boardingTime: event.target.value },
+                            }))
+                          }
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          value={draft.delayMinutes}
+                          onChange={(event) =>
+                            setEditDrafts((current) => ({
+                              ...current,
+                              [flight.id]: { ...draft, delayMinutes: event.target.value },
+                            }))
+                          }
+                          style={{ width: '64px' }}
+                        />
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <button type="button" onClick={() => void saveSnappFlight(flight.id)}>Save</button>
+                        {' '}
+                        <a href={snappBoardingUrl(flight.id, publicBaseUrl)} target="_blank" rel="noreferrer">
+                          Boarding
+                        </a>
+                        {' · '}
+                        <a href={snappFlightUrl(flight.id, publicBaseUrl)} target="_blank" rel="noreferrer">
+                          Details
+                        </a>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           )}
@@ -1820,13 +1992,22 @@ const formatSearchFlight = (row: AdminFlight) =>
 export function SearchModule() {
   const navigate = useNavigate()
   const { openFlight, subscribeFlight, assignRampAgentToFlight } = useSimulatorStore()
-  const { flights: rows, error: flightsError } = useLiveFlights()
+  const [catalogSource, setCatalogSource] = useState<FlightCatalogSource>('local')
+  const { flights: localRows, error: localError } = useLiveFlights()
+  const {
+    flights: snappRows,
+    error: snappError,
+    configured: snappConfigured,
+    publicBaseUrl,
+  } = useLiveSnappFlights(catalogSource === 'snapp')
+  const rows = catalogSource === 'snapp' ? snappRows : localRows
+  const flightsError = catalogSource === 'snapp' ? snappError : localError
   const { closures } = useLiveFlightClosures()
   const closedFlightLabels = new Set(closures.map((closure) => closure.flightLabel))
-  const [carrier, setCarrier] = useState('6X')
+  const [carrier, setCarrier] = useState('')
   const [flightNo, setFlightNo] = useState('')
   const [date, setDate] = useState('')
-  const [depPort, setDepPort] = useState('RIX')
+  const [depPort, setDepPort] = useState('')
   const [arrPort, setArrPort] = useState('')
   const [reg, setReg] = useState('')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -1871,14 +2052,82 @@ export function SearchModule() {
     <section className="module-card search-module">
       <h3>How to Find a Flight</h3>
       <p className="search-note">
-        Enter flight details, run search, then select a result and subscribe before opening Ramp.
+        First pick a flight source, then run Search. Use SNAPP Ops to see live snapp-ops flights.
       </p>
+
+      <div
+        className="search-source-toggle"
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '8px',
+          alignItems: 'center',
+          marginBottom: '14px',
+          padding: '10px 12px',
+          background: '#eef4fb',
+          border: '1px solid #b6d0ef',
+          borderRadius: '6px',
+        }}
+      >
+        <strong style={{ marginRight: '8px', fontSize: '13px' }}>Flight source:</strong>
+        <button
+          type="button"
+          onClick={() => {
+            setCatalogSource('local')
+            setSearchDone(false)
+            setSelectedIds([])
+            setSubscribed(false)
+            setAllocated(false)
+          }}
+          style={{
+            padding: '8px 14px',
+            fontWeight: 700,
+            borderRadius: '4px',
+            border: catalogSource === 'local' ? '2px solid #0b5cab' : '1px solid #94a3b8',
+            background: catalogSource === 'local' ? '#0b5cab' : '#fff',
+            color: catalogSource === 'local' ? '#fff' : '#334155',
+            cursor: 'pointer',
+          }}
+        >
+          Local / aa-lids
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setCatalogSource('snapp')
+            setSearchDone(false)
+            setSelectedIds([])
+            setSubscribed(false)
+            setAllocated(false)
+            setCarrier('')
+            setDepPort('')
+          }}
+          style={{
+            padding: '8px 14px',
+            fontWeight: 700,
+            borderRadius: '4px',
+            border: catalogSource === 'snapp' ? '2px solid #0b5cab' : '1px solid #94a3b8',
+            background: catalogSource === 'snapp' ? '#0b5cab' : '#fff',
+            color: catalogSource === 'snapp' ? '#fff' : '#334155',
+            cursor: 'pointer',
+          }}
+        >
+          SNAPP Ops
+        </button>
+        {catalogSource === 'snapp' ? (
+          <span className="search-note" style={{ margin: 0 }}>
+            {snappConfigured
+              ? `Linked · ${publicBaseUrl}`
+              : 'API needs SNAPP_BASE_URL + SNAPP_API_KEY — restart simulator-api'}
+          </span>
+        ) : null}
+      </div>
 
       <div className="search-bar">
         <label className="search-flight-number">
           Flight Number
           <span>
-            <input value={carrier} onChange={(event) => setCarrier(event.target.value.toUpperCase())} aria-label="Carrier" />
+            <input value={carrier} onChange={(event) => setCarrier(event.target.value.toUpperCase())} aria-label="Carrier" placeholder="DL" />
             <input value={flightNo} onChange={(event) => setFlightNo(event.target.value)} aria-label="Flight number" />
           </span>
         </label>
@@ -1925,13 +2174,17 @@ export function SearchModule() {
                 <th>Time</th>
                 <th>Status</th>
                 <th>Aircraft</th>
-                <th>Load Controller</th>
+                <th>{catalogSource === 'snapp' ? 'Gate' : 'Load Controller'}</th>
               </tr>
             </thead>
             <tbody>
               {visibleRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9}>No flights match the search. Add flights in Admin or create them in aa-lids.</td>
+                  <td colSpan={9}>
+                    {catalogSource === 'snapp'
+                      ? 'No SNAPP flights match. Clear filters and search again (or check simulator-api SNAPP env).'
+                      : 'No flights match the search. Add flights in Admin or create them in aa-lids.'}
+                  </td>
                 </tr>
               ) : visibleRows.map((row) => (
                 <tr key={row.id} className={selectedIds.includes(row.id) ? 'selected' : ''}>
@@ -1949,7 +2202,7 @@ export function SearchModule() {
                   <td>{row.time}</td>
                   <td>{closedFlightLabels.has(formatSearchFlight(row)) ? 'CLOSED' : row.status}</td>
                   <td>{row.aircraft}</td>
-                  <td>{row.controller}</td>
+                  <td>{catalogSource === 'snapp' ? (row.gate || '—') : row.controller}</td>
                 </tr>
               ))}
             </tbody>
@@ -1997,10 +2250,31 @@ export function SearchModule() {
             >
               Open Flight
             </button>
+            {catalogSource === 'snapp' && selected ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.open(snappBoardingUrl(selected.id, publicBaseUrl), '_blank', 'noopener,noreferrer')
+                  }}
+                >
+                  Open in SNAPP (Boarding)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.open(snappFlightUrl(selected.id, publicBaseUrl), '_blank', 'noopener,noreferrer')
+                  }}
+                >
+                  Open in SNAPP (Details)
+                </button>
+              </>
+            ) : null}
           </div>
           <p className="search-summary">
             Selected: {selectedRows.length > 0 ? `${selectedRows.length} flights` : selected ? `${selected.carrier} ${selected.flightNo} ${selected.date}` : 'none'} •
             Subscribed: {subscribed ? 'Yes' : 'No'} • Added: {allocated ? 'Yes' : 'No'}
+            {catalogSource === 'snapp' && selected?.gate ? ` • Gate ${selected.gate}` : ''}
           </p>
         </>
       ) : null}

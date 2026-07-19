@@ -22,6 +22,12 @@ import {
   upsertFlightClosure,
   upsertSession,
 } from './db.js'
+import {
+  fetchSnappFlightFromUpstream,
+  fetchSnappFlightsFromUpstream,
+  patchSnappFlightUpstream,
+  snappPublicBaseUrl,
+} from './snapp.js'
 
 const app = express()
 app.use(cors())
@@ -91,6 +97,63 @@ app.delete('/api/flights/:id', async (req, res) => {
   }
 
   res.status(204).send()
+})
+
+app.get('/api/snapp/config', (_req, res) => {
+  const configured = Boolean(process.env.SNAPP_BASE_URL?.trim() && process.env.SNAPP_API_KEY?.trim())
+  res.json({
+    configured,
+    publicBaseUrl: snappPublicBaseUrl(),
+  })
+})
+
+app.get('/api/snapp/flights', async (_req, res) => {
+  try {
+    res.json(await fetchSnappFlightsFromUpstream())
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SNAPP list failed'
+    res.status(502).json({ error: message })
+  }
+})
+
+app.get('/api/snapp/flights/:id', async (req, res) => {
+  try {
+    res.json(await fetchSnappFlightFromUpstream(req.params.id))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SNAPP get failed'
+    const status = message.includes('404') || message.toLowerCase().includes('not found') ? 404 : 502
+    res.status(status).json({ error: message })
+  }
+})
+
+app.patch('/api/snapp/flights/:id', async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {}
+  const patch: {
+    status?: string
+    gate_departure?: string
+    gate_arrival?: string
+    boarding_time?: string
+    delay_minutes?: number
+  } = {}
+  if (typeof body.status === 'string') patch.status = body.status
+  if (typeof body.gate_departure === 'string') patch.gate_departure = body.gate_departure
+  if (typeof body.gate_arrival === 'string') patch.gate_arrival = body.gate_arrival
+  if (typeof body.boarding_time === 'string') patch.boarding_time = body.boarding_time
+  if (typeof body.delay_minutes === 'number' && Number.isFinite(body.delay_minutes)) {
+    patch.delay_minutes = body.delay_minutes
+  }
+  if (Object.keys(patch).length === 0) {
+    res.status(400).json({
+      error: 'Provide at least one of: status, gate_departure, gate_arrival, boarding_time, delay_minutes',
+    })
+    return
+  }
+  try {
+    res.json(await patchSnappFlightUpstream(req.params.id, patch))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'SNAPP update failed'
+    res.status(502).json({ error: message })
+  }
 })
 
 app.get('/api/sessions', async (_req, res) => {
