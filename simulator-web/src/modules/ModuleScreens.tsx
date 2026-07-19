@@ -1028,6 +1028,7 @@ export function PassengerModule() {
   const transitTotal = draft.transit.first + draft.transit.business + draft.transit.economy
   const acceptedBreakdownTotal = draft.accepted.male + draft.accepted.female + draft.accepted.child
   const baggagePiecesTotal = draft.baggage.reduce((total, entry) => total + entry.pieces, 0)
+  const baggageWeightTotal = draft.baggage.reduce((total, entry) => total + entry.weightKg, 0)
 
   useEffect(() => {
     setDraft(createPassengerState(state.passenger))
@@ -1303,6 +1304,10 @@ export function PassengerModule() {
             <label>
               Baggage Pieces Total
               <input type="number" value={baggagePiecesTotal} readOnly />
+            </label>
+            <label>
+              Baggage Weight Total (kg)
+              <input type="number" value={baggageWeightTotal} readOnly />
             </label>
           </div>
         </section>
