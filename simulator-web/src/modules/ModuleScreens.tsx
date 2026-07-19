@@ -1533,6 +1533,7 @@ export function AdminModule() {
     error: snappError,
     configured: snappConfigured,
     publicBaseUrl,
+    statusDetail: snappStatusDetail,
     refresh: refreshSnapp,
   } = useLiveSnappFlights(catalogSource === 'snapp')
   const { closures } = useLiveFlightClosures()
@@ -1623,7 +1624,7 @@ export function AdminModule() {
           <p className="search-note" style={{ alignSelf: 'end' }}>
             {snappConfigured
               ? `Linked · ${publicBaseUrl}`
-              : 'Set SNAPP_BASE_URL + SNAPP_API_KEY on simulator-api'}
+              : snappError || snappStatusDetail || 'Connecting to SNAPP…'}
           </p>
         ) : null}
       </div>
@@ -1999,6 +2000,7 @@ export function SearchModule() {
     error: snappError,
     configured: snappConfigured,
     publicBaseUrl,
+    statusDetail: snappStatusDetail,
   } = useLiveSnappFlights(catalogSource === 'snapp')
   const rows = catalogSource === 'snapp' ? snappRows : localRows
   const flightsError = catalogSource === 'snapp' ? snappError : localError
@@ -2118,7 +2120,9 @@ export function SearchModule() {
           <span className="search-note" style={{ margin: 0 }}>
             {snappConfigured
               ? `Linked · ${publicBaseUrl}`
-              : 'API needs SNAPP_BASE_URL + SNAPP_API_KEY — restart simulator-api'}
+              : snappError
+                ? snappError
+                : snappStatusDetail || 'Connecting to SNAPP…'}
           </span>
         ) : null}
       </div>
